@@ -72,8 +72,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    """Root endpoint with API information."""
+    return {
+        "message": "RAG Training Chatbot API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "chat": "/chat",
+            "chat_stream": "/chat/stream",
+            "docs": "/docs"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render deployment."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "service": "RAG Training Chatbot API"
+    }
+
 # We'll initialize shared clients/services on startup
-@app.on_event("startup")
 async def startup_event():
     # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
     app.state.httpx_client = httpx.AsyncClient(
