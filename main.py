@@ -28,6 +28,70 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Lifespan manager for more reliable startup/shutdown
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting up RAG service...")
+    try:
+        # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
+        app.state.httpx_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=None),
+            limits=httpx.Limits(
+                max_keepalive_connections=200,  # Higher for production
+                max_connections=500,            # Support more concurrent connections
+                keepalive_expiry=30.0          # Keep connections alive longer
+            ),
+            transport=httpx.AsyncHTTPTransport(
+                retries=3,
+                http2=True  # Enable HTTP/2 for better performance
+            ),
+        )
+
+        app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
+        
+        # Initialize production rate limiting and connection management
+        app.state.rate_limiter = TokenBucketRateLimiter(
+            requests_per_minute=int(os.getenv("RATE_LIMIT_RPM", "60")),
+            burst_size=int(os.getenv("RATE_LIMIT_BURST", "10"))
+        )
+        app.state.connection_manager = ConnectionManager(
+            max_connections=int(os.getenv("MAX_CONNECTIONS", "1000"))
+        )
+        
+        # Start rate limiter cleanup
+        await app.state.rate_limiter.start_cleanup()
+        
+        # Track startup time for metrics
+        app.state.start_time = time.time()
+        
+        logger.info("Startup complete: HTTP client, RAGService, and production middleware initialized")
+        yield
+    except Exception as e:
+        logger.error(f"Startup failed: {e}")
+        raise
+    finally:
+        # Shutdown
+        logger.info("Shutting down...")
+        try:
+            if hasattr(app.state, "rate_limiter") and app.state.rate_limiter:
+                await app.state.rate_limiter.stop_cleanup()
+            if hasattr(app.state, "rag_service") and app.state.rag_service:
+                await app.state.rag_service.aclose()
+        finally:
+            if hasattr(app.state, "httpx_client") and app.state.httpx_client:
+                await app.state.httpx_client.aclose()
+        logger.info("Shutdown complete: clients closed")
+
+app = FastAPI(
+    title="RAG Training Chatbot API",
+    description="A simple RAG-based chatbot for employee training with PostgreSQL memory",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
 # Respect an env var for allowed origins; fallback to wildcard if not provided.
 cors_env = os.getenv("CORS_ALLOWED_ORIGINS")
 if cors_env:
@@ -96,54 +160,7 @@ async def health_check():
         "service": "RAG Training Chatbot API"
     }
 
-# We'll initialize shared clients/services on startup
-async def startup_event():
-    # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
-    app.state.httpx_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=None),
-        limits=httpx.Limits(
-            max_keepalive_connections=200,  # Higher for production
-            max_connections=500,            # Support more concurrent connections
-            keepalive_expiry=30.0          # Keep connections alive longer
-        ),
-        transport=httpx.AsyncHTTPTransport(
-            retries=3,
-            http2=True  # Enable HTTP/2 for better performance
-        ),
-    )
-
-    app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
-    
-    # Initialize production rate limiting and connection management
-    app.state.rate_limiter = TokenBucketRateLimiter(
-        requests_per_minute=int(os.getenv("RATE_LIMIT_RPM", "60")),
-        burst_size=int(os.getenv("RATE_LIMIT_BURST", "10"))
-    )
-    app.state.connection_manager = ConnectionManager(
-        max_connections=int(os.getenv("MAX_CONNECTIONS", "1000"))
-    )
-    
-    # Start rate limiter cleanup
-    await app.state.rate_limiter.start_cleanup()
-    
-    # Track startup time for metrics
-    app.state.start_time = time.time()
-    
-    logger.info("Startup complete: HTTP client, RAGService, and production middleware initialized")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # Close downstream clients gracefully
-    try:
-        if hasattr(app.state, "rate_limiter") and app.state.rate_limiter:
-            await app.state.rate_limiter.stop_cleanup()
-        if hasattr(app.state, "rag_service") and app.state.rag_service:
-            await app.state.rag_service.aclose()
-    finally:
-        if hasattr(app.state, "httpx_client") and app.state.httpx_client:
-            await app.state.httpx_client.aclose()
-    logger.info("Shutdown complete: clients closed")
+# Startup and shutdown are now handled by the lifespan manager above
 
 
 class ChatRequest(BaseModel):
