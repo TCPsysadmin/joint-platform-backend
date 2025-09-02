@@ -2,17 +2,20 @@
 import os
 import logging
 import uuid
+import json
+import time
+import asyncio
+import httpx
 from datetime import datetime
 from typing import Optional
-
-import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, constr
-from starlette.requests import Request
-
+from starlette.middleware.base import BaseHTTPMiddleware
 from services.rag_service import RAGService
+from services.rate_limiter import TokenBucketRateLimiter, ConnectionManager
 
 # Load environment once (entrypoint). Keep this here for local development.
 load_dotenv()
@@ -32,6 +35,35 @@ if cors_env:
 else:
     allowed_origins = ["*"]
 
+# Production monitoring middleware
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        request_id = str(uuid.uuid4())[:8]
+        
+        # Log request start
+        logger.info(
+            f"Request {request_id} started: {request.method} {request.url.path} "
+            f"from {request.client.host if request.client else 'unknown'}"
+        )
+        
+        response = await call_next(request)
+        
+        # Log request completion
+        process_time = time.time() - start_time
+        logger.info(
+            f"Request {request_id} completed: {response.status_code} "
+            f"in {process_time:.3f}s"
+        )
+        
+        # Add performance headers
+        response.headers["X-Process-Time"] = str(process_time)
+        response.headers["X-Request-ID"] = request_id
+        
+        return response
+
+app.add_middleware(RequestLoggingMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -43,21 +75,46 @@ app.add_middleware(
 # We'll initialize shared clients/services on startup
 @app.on_event("startup")
 async def startup_event():
-    # Shared HTTPX AsyncClient with pooling, timeouts, and basic retries
+    # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
     app.state.httpx_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=None),
-        limits=httpx.Limits(max_keepalive_connections=100, max_connections=200),
-        transport=httpx.AsyncHTTPTransport(retries=3),
+        timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=None),
+        limits=httpx.Limits(
+            max_keepalive_connections=200,  # Higher for production
+            max_connections=500,            # Support more concurrent connections
+            keepalive_expiry=30.0          # Keep connections alive longer
+        ),
+        transport=httpx.AsyncHTTPTransport(
+            retries=3,
+            http2=True  # Enable HTTP/2 for better performance
+        ),
     )
 
     app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
-    logger.info("Startup complete: HTTP client and RAGService initialized")
+    
+    # Initialize production rate limiting and connection management
+    app.state.rate_limiter = TokenBucketRateLimiter(
+        requests_per_minute=int(os.getenv("RATE_LIMIT_RPM", "60")),
+        burst_size=int(os.getenv("RATE_LIMIT_BURST", "10"))
+    )
+    app.state.connection_manager = ConnectionManager(
+        max_connections=int(os.getenv("MAX_CONNECTIONS", "1000"))
+    )
+    
+    # Start rate limiter cleanup
+    await app.state.rate_limiter.start_cleanup()
+    
+    # Track startup time for metrics
+    app.state.start_time = time.time()
+    
+    logger.info("Startup complete: HTTP client, RAGService, and production middleware initialized")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     # Close downstream clients gracefully
     try:
+        if hasattr(app.state, "rate_limiter") and app.state.rate_limiter:
+            await app.state.rate_limiter.stop_cleanup()
         if hasattr(app.state, "rag_service") and app.state.rag_service:
             await app.state.rag_service.aclose()
     finally:
@@ -184,7 +241,7 @@ async def health_check():
             )
 
         # Run all health checks concurrently
-        import asyncio
+        
         openai_task = asyncio.create_task(rag_service.health_check_openai())
         supabase_task = asyncio.create_task(rag_service.health_check_supabase())
         vector_task = asyncio.create_task(rag_service.health_check_vector_search())
@@ -238,6 +295,119 @@ async def health_check():
 async def simple_health_check():
     """Simple health check for load balancers - just checks if the service is running."""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """
+    Production metrics endpoint for monitoring system performance.
+    Useful for observability and alerting in production.
+    """
+    try:
+        connection_manager: ConnectionManager = app.state.connection_manager
+        connection_stats = connection_manager.get_connection_stats()
+        
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "connections": connection_stats,
+            "system": {
+                "uptime_seconds": time.time() - app.state.start_time if hasattr(app.state, 'start_time') else 0,
+            },
+            "rate_limiting": {
+                "active_buckets": len(app.state.rate_limiter.buckets) if hasattr(app.state, 'rate_limiter') else 0,
+            }
+        }
+    except Exception as e:
+        logger.exception("Failed to generate metrics")
+        return {
+            "error": "Failed to generate metrics",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
+@app.post("/chat/stream")
+async def chat_stream(request_data: ChatRequest, request: Request):
+    """
+    Production-ready streaming chat endpoint with rate limiting and connection management.
+    
+    Features:
+    - Rate limiting per IP to prevent abuse
+    - Connection management for monitoring active streams
+    - Server-Sent Events (SSE) for real-time responses
+    - Optimized for high concurrent throughput on Render
+    - Compatible with Next.js/React EventSource API
+    """
+    # Get client IP for rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Apply rate limiting
+    rate_limiter: TokenBucketRateLimiter = app.state.rate_limiter
+    await rate_limiter.check_rate_limit(client_ip)
+    
+    # Generate connection ID for tracking
+    connection_id = str(uuid.uuid4())
+    connection_manager: ConnectionManager = app.state.connection_manager
+    
+    try:
+        rag_service: RAGService = app.state.rag_service
+        if not rag_service:
+            raise HTTPException(status_code=503, detail="Service unavailable")
+
+        # Register connection
+        connection_manager.add_connection(connection_id, client_ip)
+
+        async def generate_sse():
+            """Generate Server-Sent Events for streaming response."""
+            try:
+                async for chunk in rag_service.get_rag_response_stream(
+                    user_message=request_data.message,
+                    session_id=request_data.session_id,
+                    max_tokens=request_data.max_tokens,
+                ):
+                    # Update connection activity
+                    connection_manager.update_activity(connection_id)
+                    
+                    # Format as SSE
+                    data = json.dumps(chunk, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+                
+                # Send final SSE close event
+                yield "data: [DONE]\n\n"
+                
+            except Exception as e:
+                logger.exception("Error in SSE generation for connection %s", connection_id)
+                error_data = json.dumps({
+                    "type": "error",
+                    "error": f"Stream generation failed: {str(e)}",
+                    "timestamp": datetime.utcnow().timestamp()
+                })
+                yield f"data: {error_data}\n\n"
+                yield "data: [DONE]\n\n"
+            finally:
+                # Always clean up connection
+                connection_manager.remove_connection(connection_id)
+
+        return StreamingResponse(
+            generate_sse(),
+            media_type="text/plain",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "text/plain; charset=utf-8",
+                "X-Accel-Buffering": "no",  # Disable nginx buffering for real-time streaming
+                "X-Connection-ID": connection_id,
+            }
+        )
+
+    except HTTPException:
+        # Clean up connection on HTTP errors
+        connection_manager.remove_connection(connection_id)
+        raise
+    except Exception:
+        # Clean up connection on unexpected errors
+        connection_manager.remove_connection(connection_id)
+        logger.exception("chat_stream endpoint failed for connection %s", connection_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 if __name__ == "__main__":
