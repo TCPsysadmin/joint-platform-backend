@@ -2,6 +2,7 @@
 import os
 import logging
 import uuid
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -87,6 +88,13 @@ class HistoryResponse(BaseModel):
     session_id: str
 
 
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    services: dict = Field(default_factory=dict)
+    overall_healthy: bool
+
+
 @app.get("/")
 async def root():
     return {"message": "RAG Training Chatbot API is running"}
@@ -162,10 +170,74 @@ async def clear_session(session_id: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Basic health check. (Consider extending to probe Supabase/OpenAI endpoints for readiness)"""
-    return {"status": "healthy"}
+    """Comprehensive health check that tests OpenAI and Supabase connectivity."""
+    try:
+        rag_service: RAGService = app.state.rag_service
+        if not rag_service:
+            return HealthResponse(
+                status="unhealthy",
+                timestamp=datetime.utcnow().isoformat(),
+                services={"error": "RAG service not initialized"},
+                overall_healthy=False
+            )
+
+        # Run all health checks concurrently
+        import asyncio
+        openai_task = asyncio.create_task(rag_service.health_check_openai())
+        supabase_task = asyncio.create_task(rag_service.health_check_supabase())
+        vector_task = asyncio.create_task(rag_service.health_check_vector_search())
+        
+        openai_health, supabase_health, vector_health = await asyncio.gather(
+            openai_task, supabase_task, vector_task, return_exceptions=True
+        )
+
+        # Handle any exceptions from the health checks
+        services = {}
+        
+        if isinstance(openai_health, Exception):
+            services["openai"] = {"status": "unhealthy", "error": str(openai_health)}
+        else:
+            services["openai"] = openai_health
+            
+        if isinstance(supabase_health, Exception):
+            services["supabase"] = {"status": "unhealthy", "error": str(supabase_health)}
+        else:
+            services["supabase"] = supabase_health
+            
+        if isinstance(vector_health, Exception):
+            services["vector_search"] = {"status": "unhealthy", "error": str(vector_health)}
+        else:
+            services["vector_search"] = vector_health
+
+        # Determine overall health
+        all_healthy = all(
+            service.get("status") == "healthy" 
+            for service in services.values()
+        )
+
+        return HealthResponse(
+            status="healthy" if all_healthy else "degraded",
+            timestamp=datetime.utcnow().isoformat(),
+            services=services,
+            overall_healthy=all_healthy
+        )
+
+    except Exception as e:
+        logger.exception("Health check failed")
+        return HealthResponse(
+            status="unhealthy",
+            timestamp=datetime.utcnow().isoformat(),
+            services={"error": f"Health check failed: {str(e)}"},
+            overall_healthy=False
+        )
+
+
+@app.get("/health/simple")
+async def simple_health_check():
+    """Simple health check for load balancers - just checks if the service is running."""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
 if __name__ == "__main__":

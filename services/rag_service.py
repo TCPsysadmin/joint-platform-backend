@@ -262,3 +262,85 @@ class RAGService:
         except Exception:
             self.logger.exception("Error clearing session")
             return False
+
+    async def health_check_openai(self) -> Dict[str, Any]:
+        """Check OpenAI API connectivity and response time."""
+        start_time = time.monotonic()
+        try:
+            # Simple embedding call to test connectivity
+            response = await self.openai_client.embeddings.create(
+                model="text-embedding-3-small",
+                input="health check"
+            )
+            response_time = time.monotonic() - start_time
+            
+            return {
+                "status": "healthy",
+                "response_time_ms": round(response_time * 1000, 2),
+                "model": "text-embedding-3-small"
+            }
+        except Exception as e:
+            response_time = time.monotonic() - start_time
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "response_time_ms": round(response_time * 1000, 2)
+            }
+
+    async def health_check_supabase(self) -> Dict[str, Any]:
+        """Check Supabase connectivity and response time."""
+        start_time = time.monotonic()
+        try:
+            # Simple query to test connectivity - just check if we can reach the API
+            health_url = f"{self.supabase_url.rstrip('/')}/rest/v1/"
+            response = await self.client.get(
+                health_url,
+                headers=self.supabase_headers,
+                timeout=5.0
+            )
+            response_time = time.monotonic() - start_time
+            
+            if response.status_code == 200:
+                return {
+                    "status": "healthy",
+                    "response_time_ms": round(response_time * 1000, 2),
+                    "url": self.supabase_url
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "error": f"HTTP {response.status_code}",
+                    "response_time_ms": round(response_time * 1000, 2)
+                }
+        except Exception as e:
+            response_time = time.monotonic() - start_time
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "response_time_ms": round(response_time * 1000, 2)
+            }
+
+    async def health_check_vector_search(self) -> Dict[str, Any]:
+        """Check vector search functionality with a simple test query."""
+        start_time = time.monotonic()
+        try:
+            # Create a simple test embedding
+            test_embedding = await self.get_embedding("test query")
+            
+            # Test the vector search function
+            results = await self.search_similar_documents(test_embedding, limit=1)
+            response_time = time.monotonic() - start_time
+            
+            return {
+                "status": "healthy",
+                "response_time_ms": round(response_time * 1000, 2),
+                "results_count": len(results),
+                "function": SUPABASE_MATCH_FN
+            }
+        except Exception as e:
+            response_time = time.monotonic() - start_time
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "response_time_ms": round(response_time * 1000, 2)
+            }
