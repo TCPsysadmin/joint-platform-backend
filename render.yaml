@@ -1,39 +1,32 @@
 services:
   - type: web
-    name: rag-chatbot-backend
+    name: tcp-rag-backend
     env: python
-    plan: starter  # Use 'standard' or 'pro' for production
+    plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 4 --loop uvloop --http httptools
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: OPENAI_API_KEY
-        sync: false  # Set this in Render dashboard
+        sync: false
       - key: SUPABASE_URL
-        sync: false  # Set this in Render dashboard
+        sync: false
       - key: SUPABASE_KEY
-        sync: false  # Set this in Render dashboard
+        sync: false
       - key: OPENAI_MODEL_NAME
         value: gpt-4o-mini
       - key: OPENAI_TEMPERATURE
-        value: "0.5"
+        value: 0.5
       - key: SUPABASE_MATCH_FN
         value: match_documents_justin
       - key: SUPABASE_MATCH_THRESHOLD
-        value: "0.4"
+        value: 0.4
+      - key: RATE_LIMIT_RPM
+        value: 60
+      - key: RATE_LIMIT_BURST
+        value: 10
+      - key: MAX_CONNECTIONS
+        value: 1000
       - key: CORS_ALLOWED_ORIGINS
-        value: "https://your-frontend-domain.com,https://localhost:3000"
-      - key: HOST
-        value: "0.0.0.0"
-      - key: PORT
-        fromService:
-          type: web
-          name: rag-chatbot-backend
-          property: port
-    healthCheckPath: /health/simple
-    autoDeploy: true
-    disk:
-      name: rag-chatbot-disk
-      mountPath: /tmp
-      sizeGB: 1
+        value: "*"
