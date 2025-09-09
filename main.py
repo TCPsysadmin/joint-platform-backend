@@ -28,97 +28,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Lifespan manager for more reliable startup/shutdown
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup with timeout protection
-    logger.info("Starting up RAG service...")
-    try:
-        # Set startup timeout to prevent hanging
-        startup_timeout = 30.0  # 30 seconds max for startup
-        
-        # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
-        app.state.httpx_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=None),
-            limits=httpx.Limits(
-                max_keepalive_connections=200,  # Higher for production
-                max_connections=500,            # Support more concurrent connections
-                keepalive_expiry=30.0          # Keep connections alive longer
-            ),
-            transport=httpx.AsyncHTTPTransport(
-                retries=3,
-                http2=True  # Enable HTTP/2 for better performance
-            ),
-        )
-
-        # Initialize RAG service with timeout
-        try:
-            app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
-        except Exception as e:
-            logger.error(f"Failed to initialize RAG service: {e}")
-            raise
-        
-        # Initialize production rate limiting and connection management
-        app.state.rate_limiter = TokenBucketRateLimiter(
-            requests_per_minute=int(os.getenv("RATE_LIMIT_RPM", "60")),
-            burst_size=int(os.getenv("RATE_LIMIT_BURST", "10"))
-        )
-        app.state.connection_manager = ConnectionManager(
-            max_connections=int(os.getenv("MAX_CONNECTIONS", "1000"))
-        )
-        
-        # Start rate limiter cleanup with timeout
-        try:
-            await asyncio.wait_for(
-                app.state.rate_limiter.start_cleanup(),
-                timeout=startup_timeout
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Rate limiter cleanup startup timed out, continuing...")
-        
-        # Track startup time for metrics
-        app.state.start_time = time.time()
-        
-        logger.info("Startup complete: HTTP client, RAGService, and production middleware initialized")
-        yield
-    except Exception as e:
-        logger.error(f"Startup failed: {e}")
-        raise
-    finally:
-        # Shutdown with timeout protection
-        logger.info("Shutting down...")
-        try:
-            if hasattr(app.state, "rate_limiter") and app.state.rate_limiter:
-                await asyncio.wait_for(
-                    app.state.rate_limiter.stop_cleanup(),
-                    timeout=10.0
-                )
-            if hasattr(app.state, "rag_service") and app.state.rag_service:
-                await asyncio.wait_for(
-                    app.state.rag_service.aclose(),
-                    timeout=10.0
-                )
-        except asyncio.TimeoutError:
-            logger.warning("Some shutdown operations timed out")
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
-        finally:
-            if hasattr(app.state, "httpx_client") and app.state.httpx_client:
-                await asyncio.wait_for(
-                    app.state.httpx_client.aclose(),
-                    timeout=10.0
-                )
-        logger.info("Shutdown complete: clients closed")
-
-app = FastAPI(
-    title="RAG Training Chatbot API",
-    description="A simple RAG-based chatbot for employee training with PostgreSQL memory",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
 # Respect an env var for allowed origins; fallback to wildcard if not provided.
 cors_env = os.getenv("CORS_ALLOWED_ORIGINS")
 if cors_env:
@@ -163,52 +72,69 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    """Root endpoint with API information."""
-    return {
-        "message": "RAG Training Chatbot API",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "health": "/health",
-            "chat": "/chat",
-            "chat_stream": "/chat/stream",
-            "docs": "/docs"
-        }
-    }
+# We'll initialize shared clients/services on startup
+@app.on_event("startup")
+async def startup_event():
+    # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
+    app.state.httpx_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=None),
+        limits=httpx.Limits(
+            max_keepalive_connections=200,  # Higher for production
+            max_connections=500,            # Support more concurrent connections
+            keepalive_expiry=30.0          # Keep connections alive longer
+        ),
+        transport=httpx.AsyncHTTPTransport(
+            retries=3,
+            http2=True  # Enable HTTP/2 for better performance
+        ),
+    )
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Render deployment."""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "service": "RAG Training Chatbot API"
-    }
+    app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
+    
+    # Initialize production rate limiting and connection management
+    app.state.rate_limiter = TokenBucketRateLimiter(
+        requests_per_minute=int(os.getenv("RATE_LIMIT_RPM", "60")),
+        burst_size=int(os.getenv("RATE_LIMIT_BURST", "10"))
+    )
+    app.state.connection_manager = ConnectionManager(
+        max_connections=int(os.getenv("MAX_CONNECTIONS", "1000"))
+    )
+    
+    # Start rate limiter cleanup
+    await app.state.rate_limiter.start_cleanup()
+    
+    # Track startup time for metrics
+    app.state.start_time = time.time()
+    
+    logger.info("Startup complete: HTTP client, RAGService, and production middleware initialized")
 
-@app.get("/health/simple")
-async def simple_health_check():
-    """Simple health check for load balancers - just checks if the service is running."""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "service": "RAG Training Chatbot API"
-    }
 
-# Startup and shutdown are now handled by the lifespan manager above
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Close downstream clients gracefully
+    try:
+        if hasattr(app.state, "rate_limiter") and app.state.rate_limiter:
+            await app.state.rate_limiter.stop_cleanup()
+        if hasattr(app.state, "rag_service") and app.state.rag_service:
+            await app.state.rag_service.aclose()
+    finally:
+        if hasattr(app.state, "httpx_client") and app.state.httpx_client:
+            await app.state.httpx_client.aclose()
+    logger.info("Shutdown complete: clients closed")
 
 
 class ChatRequest(BaseModel):
     message: constr(strip_whitespace=True, min_length=1, max_length=5000)
     session_id: Optional[str] = None
     max_tokens: int = Field(500, ge=32, le=1000)  # server-side caps
+    model: Optional[str] = Field(None, description="AI model to use for response generation")
 
 
 class ChatResponse(BaseModel):
     response: str
     sources: list = Field(default_factory=list)
     session_id: str
+    model: str = Field(description="AI model used for response generation")
 
 
 class SessionResponse(BaseModel):
@@ -228,7 +154,49 @@ class HealthResponse(BaseModel):
     overall_healthy: bool
 
 
-# This duplicate route was removed - keeping the comprehensive one above
+@app.get("/")
+async def root():
+    return {"message": "RAG Training Chatbot API is running"}
+
+
+@app.get("/models")
+async def get_available_models():
+    """Get list of available AI models for chat responses."""
+    return {
+        "models": [
+            {
+                "id": "gpt-5",
+                "name": "GPT-5",
+                "description": "Latest GPT-5 model with enhanced capabilities"
+            },
+            {
+                "id": "gpt-4.1", 
+                "name": "GPT-4.1",
+                "description": "Updated GPT-4 model with improved performance"
+            },
+            {
+                "id": "gpt-5-nano",
+                "name": "GPT-5 Nano", 
+                "description": "Lightweight GPT-5 model optimized for speed"
+            },
+            {
+                "id": "gpt-5-mini",
+                "name": "GPT-5 Mini",
+                "description": "Compact GPT-5 model balancing performance and efficiency"
+            },
+            {
+                "id": "o4-mini",
+                "name": "O4 Mini",
+                "description": "Optimized model for fast responses"
+            },
+            {
+                "id": "gpt-4o-mini",
+                "name": "GPT-4o Mini", 
+                "description": "Efficient GPT-4 variant for quick interactions"
+            }
+        ],
+        "default": os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -241,11 +209,13 @@ async def chat(request: ChatRequest):
             user_message=request.message,
             session_id=request.session_id,
             max_tokens=request.max_tokens,
+            model=request.model,
         )
         return ChatResponse(
             response=response["answer"],
             sources=response.get("sources", []),
             session_id=response["session_id"],
+            model=response["model"],
         )
     except HTTPException:
         raise
@@ -314,39 +284,15 @@ async def health_check():
                 overall_healthy=False
             )
 
-        # Run all health checks concurrently with fallbacks for missing methods
+        # Run all health checks concurrently
         
-        health_tasks = []
+        openai_task = asyncio.create_task(rag_service.health_check_openai())
+        supabase_task = asyncio.create_task(rag_service.health_check_supabase())
+        vector_task = asyncio.create_task(rag_service.health_check_vector_search())
         
-        # Check if methods exist before calling them
-        if hasattr(rag_service, 'health_check_openai'):
-            openai_task = asyncio.create_task(rag_service.health_check_openai())
-            health_tasks.append(('openai', openai_task))
-        else:
-            openai_health = {"status": "unhealthy", "error": "Method not implemented"}
-            
-        if hasattr(rag_service, 'health_check_supabase'):
-            supabase_task = asyncio.create_task(rag_service.health_check_supabase())
-            health_tasks.append(('supabase', supabase_task))
-        else:
-            supabase_health = {"status": "unhealthy", "error": "Method not implemented"}
-            
-        if hasattr(rag_service, 'health_check_vector_search'):
-            vector_task = asyncio.create_task(rag_service.health_check_vector_search())
-            health_tasks.append(('vector_search', vector_task))
-        else:
-            vector_health = {"status": "unhealthy", "error": "Method not implemented"}
-        
-        # Wait for existing tasks to complete
-        if health_tasks:
-            results = await asyncio.gather(*[task for _, task in health_tasks], return_exceptions=True)
-            for i, (name, _) in enumerate(health_tasks):
-                if name == 'openai':
-                    openai_health = results[i]
-                elif name == 'supabase':
-                    supabase_health = results[i]
-                elif name == 'vector_search':
-                    vector_health = results[i]
+        openai_health, supabase_health, vector_health = await asyncio.gather(
+            openai_task, supabase_task, vector_task, return_exceptions=True
+        )
 
         # Handle any exceptions from the health checks
         services = {}
@@ -461,6 +407,7 @@ async def chat_stream(request_data: ChatRequest, request: Request):
                     user_message=request_data.message,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
+                    model=request_data.model,
                 ):
                     # Update connection activity
                     connection_manager.update_activity(connection_id)
