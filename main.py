@@ -33,9 +33,12 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup with timeout protection
     logger.info("Starting up RAG service...")
     try:
+        # Set startup timeout to prevent hanging
+        startup_timeout = 30.0  # 30 seconds max for startup
+        
         # Production-optimized HTTPX AsyncClient with aggressive pooling for high throughput
         app.state.httpx_client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=None),
@@ -50,7 +53,12 @@ async def lifespan(app: FastAPI):
             ),
         )
 
-        app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
+        # Initialize RAG service with timeout
+        try:
+            app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
+        except Exception as e:
+            logger.error(f"Failed to initialize RAG service: {e}")
+            raise
         
         # Initialize production rate limiting and connection management
         app.state.rate_limiter = TokenBucketRateLimiter(
@@ -61,8 +69,14 @@ async def lifespan(app: FastAPI):
             max_connections=int(os.getenv("MAX_CONNECTIONS", "1000"))
         )
         
-        # Start rate limiter cleanup
-        await app.state.rate_limiter.start_cleanup()
+        # Start rate limiter cleanup with timeout
+        try:
+            await asyncio.wait_for(
+                app.state.rate_limiter.start_cleanup(),
+                timeout=startup_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Rate limiter cleanup startup timed out, continuing...")
         
         # Track startup time for metrics
         app.state.start_time = time.time()
@@ -73,16 +87,29 @@ async def lifespan(app: FastAPI):
         logger.error(f"Startup failed: {e}")
         raise
     finally:
-        # Shutdown
+        # Shutdown with timeout protection
         logger.info("Shutting down...")
         try:
             if hasattr(app.state, "rate_limiter") and app.state.rate_limiter:
-                await app.state.rate_limiter.stop_cleanup()
+                await asyncio.wait_for(
+                    app.state.rate_limiter.stop_cleanup(),
+                    timeout=10.0
+                )
             if hasattr(app.state, "rag_service") and app.state.rag_service:
-                await app.state.rag_service.aclose()
+                await asyncio.wait_for(
+                    app.state.rag_service.aclose(),
+                    timeout=10.0
+                )
+        except asyncio.TimeoutError:
+            logger.warning("Some shutdown operations timed out")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
         finally:
             if hasattr(app.state, "httpx_client") and app.state.httpx_client:
-                await app.state.httpx_client.aclose()
+                await asyncio.wait_for(
+                    app.state.httpx_client.aclose(),
+                    timeout=10.0
+                )
         logger.info("Shutdown complete: clients closed")
 
 app = FastAPI(
@@ -160,6 +187,15 @@ async def health_check():
         "service": "RAG Training Chatbot API"
     }
 
+@app.get("/health/simple")
+async def simple_health_check():
+    """Simple health check for load balancers - just checks if the service is running."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "service": "RAG Training Chatbot API"
+    }
+
 # Startup and shutdown are now handled by the lifespan manager above
 
 
@@ -192,9 +228,7 @@ class HealthResponse(BaseModel):
     overall_healthy: bool
 
 
-@app.get("/")
-async def root():
-    return {"message": "RAG Training Chatbot API is running"}
+# This duplicate route was removed - keeping the comprehensive one above
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -280,15 +314,39 @@ async def health_check():
                 overall_healthy=False
             )
 
-        # Run all health checks concurrently
+        # Run all health checks concurrently with fallbacks for missing methods
         
-        openai_task = asyncio.create_task(rag_service.health_check_openai())
-        supabase_task = asyncio.create_task(rag_service.health_check_supabase())
-        vector_task = asyncio.create_task(rag_service.health_check_vector_search())
+        health_tasks = []
         
-        openai_health, supabase_health, vector_health = await asyncio.gather(
-            openai_task, supabase_task, vector_task, return_exceptions=True
-        )
+        # Check if methods exist before calling them
+        if hasattr(rag_service, 'health_check_openai'):
+            openai_task = asyncio.create_task(rag_service.health_check_openai())
+            health_tasks.append(('openai', openai_task))
+        else:
+            openai_health = {"status": "unhealthy", "error": "Method not implemented"}
+            
+        if hasattr(rag_service, 'health_check_supabase'):
+            supabase_task = asyncio.create_task(rag_service.health_check_supabase())
+            health_tasks.append(('supabase', supabase_task))
+        else:
+            supabase_health = {"status": "unhealthy", "error": "Method not implemented"}
+            
+        if hasattr(rag_service, 'health_check_vector_search'):
+            vector_task = asyncio.create_task(rag_service.health_check_vector_search())
+            health_tasks.append(('vector_search', vector_task))
+        else:
+            vector_health = {"status": "unhealthy", "error": "Method not implemented"}
+        
+        # Wait for existing tasks to complete
+        if health_tasks:
+            results = await asyncio.gather(*[task for _, task in health_tasks], return_exceptions=True)
+            for i, (name, _) in enumerate(health_tasks):
+                if name == 'openai':
+                    openai_health = results[i]
+                elif name == 'supabase':
+                    supabase_health = results[i]
+                elif name == 'vector_search':
+                    vector_health = results[i]
 
         # Handle any exceptions from the health checks
         services = {}

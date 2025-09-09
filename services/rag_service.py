@@ -12,12 +12,12 @@ import httpx
 import openai
 
 from .langchain_memory import LangChainMemoryService
-from .prompts import prompt_two
+from .prompts import *
 
 # ---- Constants / Config ----
 MAX_MESSAGES = 20
 TOP_K = 4  # retrieval top-k (keep small for latency/cost)
-CONTEXT_CHAR_BUDGET = 24000  # ~character budget; consider switching to token-based trimming
+CONTEXT_CHAR_BUDGET = 36000  # ~character budget; consider switching to token-based trimming
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
 SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "match_documents_justin")  # make configurable
@@ -153,7 +153,7 @@ class RAGService:
         self.logger.error("Vector search failed after retries")
         return []
 
-    async def get_rag_response(self, user_message: str, session_id: Optional[str] = None, max_tokens: int = 500) -> Dict[str, Any]:
+    async def get_rag_response(self, user_message: str, session_id: Optional[str] = None, max_tokens: int = 500, model: Optional[str] = None) -> Dict[str, Any]:
         """Generate a RAG-based AI response."""
         t0 = time.monotonic()
         try:
@@ -186,7 +186,7 @@ class RAGService:
             context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
 
             # Build messages
-            system_prompt = prompt_two()  # expects {context}
+            system_prompt = prompt_five()  # expects {context}
             messages = [
                 {"role": "system", "content": system_prompt.format(context=context)},
                 *conversation_history,
@@ -196,15 +196,25 @@ class RAGService:
             # Clamp tokens server-side (defense-in-depth; request model already validates)
             max_tokens = max(32, min(int(max_tokens), 1000))
 
+            # Determine which model to use
+            selected_model = model if model else MODEL_NAME
+            
+            # Validate model selection
+            valid_models = ["gpt-5", "gpt-4.1", "gpt-5-nano", "gpt-5-mini", "gpt-4o-mini"]
+            if model and model not in valid_models:
+                raise ValueError(f"Invalid model '{model}'. Valid options: {', '.join(valid_models)}")
+
+            # Get model-specific parameters
+            model_params = {"max_tokens": max_tokens}
+
             # LLM call (timed) with retries
             t_llm_start = time.monotonic()
             try:
                 response = await self._retry_async_call(
                     lambda: self.openai_client.chat.completions.create(
-                        model=MODEL_NAME,
+                        model=selected_model,
                         messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=OPENAI_TEMPERATURE,
+                        **model_params,
                     ),
                     attempts=3,
                     base_delay=1.0,
@@ -243,7 +253,8 @@ class RAGService:
             return {
                 "answer": assistant_response,
                 "sources": sources,
-                "session_id": session_id
+                "session_id": session_id,
+                "model": selected_model
             }
 
         except Exception:
@@ -347,156 +358,172 @@ class RAGService:
             }
 
     async def get_rag_response_stream(
-        self, 
-        user_message: str, 
-        session_id: Optional[str] = None, 
-        max_tokens: int = 500
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Generate a streaming RAG-based AI response using Server-Sent Events."""
-        t0 = time.monotonic()
-        
-        try:
-            # Ensure we have a session
-            if not session_id:
-                session_id = str(uuid.uuid4())
+            self,
+            user_message: str,
+            session_id: Optional[str] = None,
+            max_tokens: int = 600,
+            model: Optional[str] = None
+        ) -> AsyncGenerator[Dict[str, Any], None]:
+            """Generate a streaming RAG-based AI response using Server-Sent Events."""
+            t0 = time.monotonic()
 
-            # Yield session info immediately
-            yield {
-                "type": "session",
-                "session_id": session_id,
-                "timestamp": time.time()
-            }
-
-            # Store user message first so history includes it
-            await self.memory_service.add_user_message(session_id, user_message)
-
-            # Yield status update
-            yield {
-                "type": "status",
-                "message": "Processing query...",
-                "timestamp": time.time()
-            }
-
-            # Prepare retrieval
-            expanded_message = expand_acronyms(user_message)
-
-            # Embedding (timed)
-            t_embed_start = time.monotonic()
-            query_embedding = await self.get_embedding(expanded_message)
-            t_embed = time.monotonic() - t_embed_start
-
-            # Yield embedding completion
-            yield {
-                "type": "status",
-                "message": "Searching knowledge base...",
-                "timestamp": time.time()
-            }
-
-            # Fetch history and docs concurrently (after embedding)
-            t_io_start = time.monotonic()
-            history_task = asyncio.create_task(
-                self.memory_service.get_conversation_history(session_id, limit=MAX_MESSAGES)
-            )
-            docs_task = asyncio.create_task(
-                self.search_similar_documents(query_embedding, limit=TOP_K)
-            )
-            conversation_history, similar_docs = await asyncio.gather(history_task, docs_task)
-            t_io = time.monotonic() - t_io_start
-
-            # Context packing
-            sources: List[Dict[str, Any]] = []
-            for d in similar_docs:
-                sources.append({"id": d.get("id"), "metadata": d.get("metadata", {})})
-            context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
-
-            # Yield sources found
-            yield {
-                "type": "sources",
-                "sources": sources,
-                "timestamp": time.time()
-            }
-
-            # Build messages
-            system_prompt = prompt_two()
-            messages = [
-                {"role": "system", "content": system_prompt.format(context=context)},
-                *conversation_history,
-                {"role": "user", "content": user_message},
-            ]
-
-            # Clamp tokens server-side
-            max_tokens = max(32, min(int(max_tokens), 1000))
-
-            # Yield generation start
-            yield {
-                "type": "status",
-                "message": "Generating response...",
-                "timestamp": time.time()
-            }
-
-            # LLM streaming call (timed) with retries
-            t_llm_start = time.monotonic()
-            full_response = ""
-            
             try:
-                stream = await self._retry_async_call(
-                    lambda: self.openai_client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=OPENAI_TEMPERATURE,
-                        stream=True,  # Enable streaming
-                    ),
-                    attempts=3,
-                    base_delay=1.0,
-                )
+                # Ensure we have a session
+                if not session_id:
+                    session_id = str(uuid.uuid4())
 
-                # Stream the response
-                async for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
-                        full_response += content
-                        
-                        yield {
-                            "type": "content",
-                            "content": content,
-                            "timestamp": time.time()
-                        }
-
-            except Exception:
-                self.logger.exception("LLM streaming call failed after retries")
                 yield {
-                    "type": "error",
-                    "error": "Failed to generate response",
+                    "type": "session",
+                    "session_id": session_id,
                     "timestamp": time.time()
                 }
-                return
 
-            t_llm = time.monotonic() - t_llm_start
+                await self.memory_service.add_user_message(session_id, user_message)
 
-            # Save assistant reply
-            if full_response:
-                await self.memory_service.add_ai_message(session_id, full_response)
+                yield {
+                    "type": "status",
+                    "message": "Processing query...",
+                    "timestamp": time.time()
+                }
 
-            # Log timings
-            t_total = time.monotonic() - t0
-            self.logger.info(
-                "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
-                session_id, t_embed, t_io, t_llm, t_total
-            )
+                # Expand acronyms and get embedding
+                expanded_message = expand_acronyms(user_message)
 
-            # Yield completion
-            yield {
-                "type": "done",
-                "session_id": session_id,
-                "total_time": t_total,
-                "timestamp": time.time()
-            }
+                t_embed_start = time.monotonic()
+                query_embedding = await self.get_embedding(expanded_message)
+                t_embed = time.monotonic() - t_embed_start
 
-        except Exception as e:
-            self.logger.exception("Error generating streaming RAG response")
-            yield {
-                "type": "error",
-                "error": f"RAG response generation failed: {str(e)}",
-                "timestamp": time.time()
-            }
+                yield {
+                    "type": "status",
+                    "message": "Searching knowledge base...",
+                    "timestamp": time.time()
+                }
+
+                # Retrieve history and docs concurrently
+                t_io_start = time.monotonic()
+                history_task = asyncio.create_task(
+                    self.memory_service.get_conversation_history(session_id, limit=MAX_MESSAGES)
+                )
+                docs_task = asyncio.create_task(
+                    self.search_similar_documents(query_embedding, limit=TOP_K)
+                )
+                conversation_history, similar_docs = await asyncio.gather(history_task, docs_task)
+                t_io = time.monotonic() - t_io_start
+
+                # Prepare context & sources
+                sources = [{"id": d.get("id"), "metadata": d.get("metadata", {})} for d in similar_docs]
+                context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
+
+                yield {
+                    "type": "sources",
+                    "sources": sources,
+                    "timestamp": time.time()
+                }
+
+                # Build messages for the LLM
+                system_prompt = prompt_five()
+                messages = [
+                    {"role": "system", "content": system_prompt.format(context=context)},
+                    *conversation_history,
+                    {"role": "user", "content": user_message},
+                ]
+
+                max_tokens = max(32, min(int(max_tokens), 1000))
+                selected_model = model if model else MODEL_NAME
+
+                valid_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o-mini"]
+                if model and model not in valid_models:
+                    yield {
+                        "type": "error",
+                        "error": f"Invalid model '{model}'. Valid options: {', '.join(valid_models)}",
+                        "timestamp": time.time()
+                    }
+                    return
+
+                yield {
+                    "type": "status",
+                    "message": f"Generating response using {selected_model}...",
+                    "timestamp": time.time()
+                }
+
+                # Fixed parameter handling — always use `max_tokens`
+                model_params = get_model_params(selected_model, max_tokens)
+
+                t_llm_start = time.monotonic()
+                full_response = ""
+
+                try:
+                    stream = await self._retry_async_call(
+                        lambda: self.openai_client.chat.completions.create(
+                            model=selected_model,
+                            messages=messages,
+                            stream=True,
+                            **model_params,
+                        ),
+                        attempts=3,
+                        base_delay=1.0,
+                    )
+
+                    async for chunk in stream:
+                        try:
+                            delta = getattr(chunk.choices[0], "delta", None)
+                            content = getattr(delta, "content", None) if delta else None
+                        except Exception:
+                            content = None
+
+                        if content:
+                            full_response += content
+                            yield {
+                                "type": "content",
+                                "content": content,
+                                "timestamp": time.time()
+                            }
+
+                except Exception as e:
+                    self.logger.exception("LLM streaming call failed after retries")
+                    yield {
+                        "type": "error",
+                        "error": f"Failed to generate response: {str(e)}",
+                        "timestamp": time.time()
+                    }
+                    return
+
+                t_llm = time.monotonic() - t_llm_start
+
+                # Save the full AI response
+                if full_response:
+                    await self.memory_service.add_ai_message(session_id, full_response)
+
+                t_total = time.monotonic() - t0
+                self.logger.info(
+                    "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
+                    session_id, t_embed, t_io, t_llm, t_total
+                )
+
+                yield {
+                    "type": "done",
+                    "session_id": session_id,
+                    "model": selected_model,
+                    "total_time": t_total,
+                    "timestamp": time.time()
+                }
+
+            except Exception as e:
+                self.logger.exception("Error generating streaming RAG response")
+                yield {
+                    "type": "error",
+                    "error": f"RAG response generation failed: {str(e)}",
+                    "timestamp": time.time()
+                }
+
+
+def get_model_params(model: str, max_tokens: int) -> Dict[str, Any]:
+    params = {}
+    new_token_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"]
+
+    if model in new_token_models:
+        params["max_completion_tokens"] = 2000
+    else:
+        params["max_tokens"] = max_tokens
+
+    return params
