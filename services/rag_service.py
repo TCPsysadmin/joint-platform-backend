@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 import httpx
 import openai
 from xai_sdk import AsyncClient
+from xai_sdk.chat import user, system, assistant
 from .langchain_memory import LangChainMemoryService
 from .prompts import *
 
@@ -585,11 +586,11 @@ class RAGService:
 
                     # Build messages for the LLM
                     system_prompt = prompt_five()
-                    messages = [
-                        {"role": "system", "content": system_prompt.format(context=context)},
-                        *conversation_history,
-                        {"role": "user", "content": user_message},
-                    ]
+                    # messages = [
+                    #     {"role": "system", "content": system_prompt.format(context=context)},
+                    #     *conversation_history,
+                    #     {"role": "user", "content": user_message},
+                    # ]
 
                     max_tokens = max(32, min(int(max_tokens), 1000))
                     selected_model = "grok-4-fast-reasoning"
@@ -598,35 +599,14 @@ class RAGService:
                     full_response = ""
 
                     try:
-                        chat = await self.grok_client.chat.create(
+                        chat = self.grok_client.chat.create(
                             model=selected_model,
                             max_tokens=max_tokens,
                         )
-                        chat.append(messages)
+                        chat.append(system("You're a really nice friendly robot who loves cheese"))
+                        chat.append(user("Tell me what there is to know about potatoes"))
                         async for response, chunk in chat.stream():
-                            # # The SDK yields different event types (e.g. delta chunks, error, done)
-                            # if event.type == "message.delta":
-                            #     delta = event.delta
-                            #     content = getattr(delta, "content", None)
-                            #     if content:
-                            #         full_response += content
-                            #         yield {
-                            #             "type": "content",
-                            #             "content": content,
-                            #             "timestamp": time.time()
-                            #         }
 
-                            # elif event.type == "error":
-                            #     # Optional: handle errors from the stream
-                            #     yield {
-                            #         "type": "error",
-                            #         "error": event.error,
-                            #         "timestamp": time.time()
-                            #     }
-
-                            # elif event.type == "message.stop":
-                            #     # Stream is finished
-                            #     break
                             print(chunk.content, end="", flush=True) # Each chunk's content
                             print(response.content, end="", flush=True) # The response object auto-accumulates the chunks
 
