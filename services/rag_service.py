@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 
 import httpx
 import openai
-
+from xai_sdk import AsyncClient
 from .langchain_memory import LangChainMemoryService
 from .prompts import *
 
@@ -22,6 +22,7 @@ MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
 SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "match_documents_justin")  # make configurable
 MATCH_THRESHOLD = float(os.getenv("SUPABASE_MATCH_THRESHOLD", "0.4"))
+MAX_GROK_REQUESTS = 40
 
 ACRONYM_MAP = {
     "TCP": "The Collaborative Process",
@@ -61,12 +62,15 @@ class RAGService:
         self.client = client
         self.logger = logger or logging.getLogger("uvicorn.error")
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        x_api_key = os.getenv("GROK_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY must be set")
+        if not x_api_key:
             raise ValueError("OPENAI_API_KEY must be set")
         # create OpenAI async client
-        self.openai_client = openai.AsyncOpenAI(api_key=api_key)
-
+        self.openai_client = openai.AsyncOpenAI(api_key=openai_api_key)
+        self.grok_client = AsyncClient(api_key=x_api_key, timeout=4800)
         self.supabase_url = os.getenv("SUPABASE_URL")
         self.supabase_key = os.getenv("SUPABASE_KEY")
         if not self.supabase_url or not self.supabase_key:
@@ -357,11 +361,11 @@ class RAGService:
                 "response_time_ms": round(response_time * 1000, 2)
             }
 
-    async def get_rag_response_stream(
+    async def get_gpt_response_stream(
             self,
             user_message: str,
             session_id: Optional[str] = None,
-            max_tokens: int = 600,
+            max_tokens: int = 700,
             model: Optional[str] = None
         ) -> AsyncGenerator[Dict[str, Any], None]:
             """Generate a streaming RAG-based AI response using Server-Sent Events."""
@@ -515,6 +519,153 @@ class RAGService:
                     "error": f"RAG response generation failed: {str(e)}",
                     "timestamp": time.time()
                 }
+                    
+    async def get_grok_response_stream(
+                self,
+                user_message: str,
+                session_id: Optional[str] = None,
+                max_tokens: int = 700,
+                model: Optional[str] = None
+            ) -> AsyncGenerator[Dict[str, Any], None]:
+                """Generate a streaming RAG-based AI response using Server-Sent Events."""
+                t0 = time.monotonic()
+
+                try:
+                    # Ensure we have a session
+                    if not session_id:
+                        session_id = str(uuid.uuid4())
+
+                    yield {
+                        "type": "session",
+                        "session_id": session_id,
+                        "timestamp": time.time()
+                    }
+
+                    await self.memory_service.add_user_message(session_id, user_message)
+
+                    yield {
+                        "type": "status",
+                        "message": "Processing query...",
+                        "timestamp": time.time()
+                    }
+
+                    # Expand acronyms and get embedding
+                    expanded_message = expand_acronyms(user_message)
+
+                    t_embed_start = time.monotonic()
+                    query_embedding = await self.get_embedding(expanded_message)
+                    t_embed = time.monotonic() - t_embed_start
+
+                    yield {
+                        "type": "status",
+                        "message": "Searching knowledge base...",
+                        "timestamp": time.time()
+                    }
+
+                    # Retrieve history and docs concurrently
+                    t_io_start = time.monotonic()
+                    history_task = asyncio.create_task(
+                        self.memory_service.get_conversation_history(session_id, limit=MAX_MESSAGES)
+                    )
+                    docs_task = asyncio.create_task(
+                        self.search_similar_documents(query_embedding, limit=TOP_K)
+                    )
+                    conversation_history, similar_docs = await asyncio.gather(history_task, docs_task)
+                    t_io = time.monotonic() - t_io_start
+
+                    # Prepare context & sources
+                    sources = [{"id": d.get("id"), "metadata": d.get("metadata", {})} for d in similar_docs]
+                    context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
+
+                    yield {
+                        "type": "sources",
+                        "sources": sources,
+                        "timestamp": time.time()
+                    }
+
+                    # Build messages for the LLM
+                    system_prompt = prompt_five()
+                    messages = [
+                        {"role": "system", "content": system_prompt.format(context=context)},
+                        *conversation_history,
+                        {"role": "user", "content": user_message},
+                    ]
+
+                    max_tokens = max(32, min(int(max_tokens), 1000))
+                    selected_model = "grok-4-fast-reasoning"
+
+                    t_llm_start = time.monotonic()
+                    full_response = ""
+
+                    try:
+                        chat = await self.grok_client.chat.create(
+                            model=selected_model,
+                            max_tokens=max_tokens,
+                        )
+                        chat.append(messages)
+                        async for response, chunk in chat.stream():
+                            # # The SDK yields different event types (e.g. delta chunks, error, done)
+                            # if event.type == "message.delta":
+                            #     delta = event.delta
+                            #     content = getattr(delta, "content", None)
+                            #     if content:
+                            #         full_response += content
+                            #         yield {
+                            #             "type": "content",
+                            #             "content": content,
+                            #             "timestamp": time.time()
+                            #         }
+
+                            # elif event.type == "error":
+                            #     # Optional: handle errors from the stream
+                            #     yield {
+                            #         "type": "error",
+                            #         "error": event.error,
+                            #         "timestamp": time.time()
+                            #     }
+
+                            # elif event.type == "message.stop":
+                            #     # Stream is finished
+                            #     break
+                            print(chunk.content, end="", flush=True) # Each chunk's content
+                            print(response.content, end="", flush=True) # The response object auto-accumulates the chunks
+
+                    except Exception as e:
+                        self.logger.exception("LLM streaming call failed after retries")
+                        yield {
+                            "type": "error",
+                            "error": f"Failed to generate response: {str(e)}",
+                            "timestamp": time.time()
+                        }
+                        return
+
+                    t_llm = time.monotonic() - t_llm_start
+
+                    # Save the full AI response
+                    if full_response:
+                        await self.memory_service.add_ai_message(session_id, full_response)
+
+                    t_total = time.monotonic() - t0
+                    self.logger.info(
+                        "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
+                        session_id, t_embed, t_io, t_llm, t_total
+                    )
+
+                    yield {
+                        "type": "done",
+                        "session_id": session_id,
+                        "model": selected_model,
+                        "total_time": t_total,
+                        "timestamp": time.time()
+                    }
+
+                except Exception as e:
+                    self.logger.exception("Error generating streaming RAG response")
+                    yield {
+                        "type": "error",
+                        "error": f"RAG response generation failed: {str(e)}",
+                        "timestamp": time.time()
+                    }
 
 
 def get_model_params(model: str, max_tokens: int) -> Dict[str, Any]:

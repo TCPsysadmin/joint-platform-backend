@@ -403,7 +403,8 @@ async def chat_stream(request_data: ChatRequest, request: Request):
         async def generate_sse():
             """Generate Server-Sent Events for streaming response."""
             try:
-                async for chunk in rag_service.get_rag_response_stream(
+                # async for chunk in rag_service.get_gpt_response_stream(
+                async for chunk in rag_service.get_grok_response_stream(
                     user_message=request_data.message,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
