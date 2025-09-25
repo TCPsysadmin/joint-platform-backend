@@ -436,8 +436,8 @@ class RAGService:
                 max_tokens = max(32, min(int(max_tokens), 1000))
                 selected_model = model if model else MODEL_NAME
 
-                valid_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o-mini"]
-                if model and model not in valid_models:
+                # valid_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o-mini"]
+                if model != "gpt-4o-mini":
                     yield {
                         "type": "error",
                         "error": f"Invalid model '{model}'. Valid options: {', '.join(valid_models)}",
