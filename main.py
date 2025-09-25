@@ -164,35 +164,20 @@ async def get_available_models():
     """Get list of available AI models for chat responses."""
     return {
         "models": [
-            {
-                "id": "gpt-5",
-                "name": "GPT-5",
-                "description": "Latest GPT-5 model with enhanced capabilities"
-            },
-            {
-                "id": "gpt-4.1", 
-                "name": "GPT-4.1",
-                "description": "Updated GPT-4 model with improved performance"
-            },
-            {
-                "id": "gpt-5-nano",
-                "name": "GPT-5 Nano", 
-                "description": "Lightweight GPT-5 model optimized for speed"
-            },
-            {
-                "id": "gpt-5-mini",
-                "name": "GPT-5 Mini",
-                "description": "Compact GPT-5 model balancing performance and efficiency"
-            },
-            {
-                "id": "o4-mini",
-                "name": "O4 Mini",
-                "description": "Optimized model for fast responses"
-            },
-            {
+              {
                 "id": "gpt-4o-mini",
-                "name": "GPT-4o Mini", 
+                "name": "GPT-4o Mini",
                 "description": "Efficient GPT-4 variant for quick interactions"
+            },
+            {
+                "id": "grok-4-fast-reasoning",
+                "name": "Grok 4 Fast Reasoning",
+                "description": "Lightweight grok model optimized for speed and intelligence"
+            },
+            {
+                "id": "gpt-3-mini",
+                "name": "Grok 3 Mini",
+                "description": "Grok model with longer thinking process"
             }
         ],
         "default": os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
@@ -403,8 +388,12 @@ async def chat_stream(request_data: ChatRequest, request: Request):
         async def generate_sse():
             """Generate Server-Sent Events for streaming response."""
             try:
-                # async for chunk in rag_service.get_gpt_response_stream(
-                async for chunk in rag_service.get_grok_response_stream(
+                # GATE HERE
+                if request_data.model == "gpt-4o-mini":
+                    stream_gen = rag_service.get_gpt_response_stream
+                else:
+                    stream_gen = rag_service.get_grok_response_stream
+                async for chunk in stream_gen(
                     user_message=request_data.message,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
