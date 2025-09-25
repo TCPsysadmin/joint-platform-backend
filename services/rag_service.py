@@ -586,29 +586,44 @@ class RAGService:
 
                     # Build messages for the LLM
                     system_prompt = prompt_five()
-                    # messages = [
-                    #     {"role": "system", "content": system_prompt.format(context=context)},
-                    #     *conversation_history,
-                    #     {"role": "user", "content": user_message},
-                    # ]
+                    messages = [
+                        system(system_prompt.format(context=context))
+                    ]
+
+                    for msg in conversation_history:
+                        if msg["role"] == "assistant":
+                            messages.append(assistant(msg["content"]))
+                        else:
+                            messages.append(user(msg["content"]))
+                    messages.append(user(user_message))
 
                     max_tokens = max(32, min(int(max_tokens), 1000))
-                    selected_model = "grok-4-fast-reasoning"
+                    selected_model = model if model in ["grok-4-fast-reasoning", "grok-3-mini"] else "grok-4-fast-reasoning"
 
                     t_llm_start = time.monotonic()
                     full_response = ""
 
                     try:
-                        chat = self.grok_client.chat.create(
-                            model=selected_model,
-                            max_tokens=max_tokens,
-                        )
-                        chat.append(system("You're a really nice friendly robot who loves cheese"))
-                        chat.append(user("Tell me what there is to know about potatoes"))
-                        async for response, chunk in chat.stream():
+                        chat = await self._retry_async_call(
+                                lambda: asyncio.to_thread(
+                                    self.grok_client.chat.create,
+                                    model=selected_model,
+                                    max_tokens=max_tokens,
+                                    messages=messages,
+                                ),
+                                attempts=3,
+                                base_delay=1.0,
+                            )
 
-                            print(chunk.content, end="", flush=True) # Each chunk's content
-                            print(response.content, end="", flush=True) # The response object auto-accumulates the chunks
+                        async for response, chunk in chat.stream():
+                            content = getattr(chunk, "content", None)
+                            if content:
+                                full_response += content
+                                yield {
+                                    "type": "content",
+                                    "content": content,
+                                    "timestamp": time.time()
+                                }
 
                     except Exception as e:
                         self.logger.exception("LLM streaming call failed after retries")
