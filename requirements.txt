@@ -12,3 +12,4 @@ psycopg2-binary>=2.9.0
 httpx>=0.25.0
 sse-starlette>=1.6.5
 xai_sdk
+python-jose

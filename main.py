@@ -9,11 +9,14 @@ import httpx
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, constr
 from starlette.middleware.base import BaseHTTPMiddleware
+import jwt  # PyJWT
+
 from services.rag_service import RAGService
 from services.rate_limiter import TokenBucketRateLimiter, ConnectionManager
 
@@ -27,6 +30,13 @@ app = FastAPI(
     description="A simple RAG-based chatbot for employee training with PostgreSQL memory",
     version="1.0.0",
 )
+
+# JWT config (already initiated in env)
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ISSUER = os.getenv("JWT_ISSUER")
+
+if not JWT_SECRET or not JWT_ISSUER:
+    logger.warning("JWT_SECRET or JWT_ISSUER not configured; protected routes will fail auth")
 
 # Respect an env var for allowed origins; fallback to wildcard if not provided.
 cors_env = os.getenv("CORS_ALLOWED_ORIGINS")
@@ -71,6 +81,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Auth models and helpers
+class AuthenticatedUser(BaseModel):
+    sub: str
+    tier: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+    iat: Optional[int] = None
+    exp: Optional[int] = None
+    iss: Optional[str] = None
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+def decode_jwt(token: str) -> AuthenticatedUser:
+    if not JWT_SECRET or not JWT_ISSUER:
+        raise HTTPException(status_code=500, detail="Auth configuration missing on server")
+    try:
+        decoded = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            issuer=JWT_ISSUER,
+            options={"require": ["iss", "sub"], "verify_exp": True, "verify_signature": True},
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidIssuerError:
+        raise HTTPException(status_code=401, detail="Invalid token issuer")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+    sub = decoded.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Token missing subject (sub)")
+
+    return AuthenticatedUser(
+        sub=sub,
+        tier=decoded.get("tier"),
+        email=decoded.get("email"),
+        name=decoded.get("name"),
+        iat=decoded.get("iat"),
+        exp=decoded.get("exp"),
+        iss=decoded.get("iss"),
+    )
+
+def require_auth(credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)) -> AuthenticatedUser:
+    if credentials is None or not credentials.scheme.lower() == "bearer" or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Authorization header missing or invalid")
+    return decode_jwt(credentials.credentials)
+
+def require_auth_with_tier(user: AuthenticatedUser = Depends(require_auth)) -> AuthenticatedUser:
+    # /chat/stream specifically requires tier present in JWT
+    if not user.tier or not isinstance(user.tier, str) or not user.tier.strip():
+        raise HTTPException(status_code=403, detail="User tier missing in token")
+    return user
 
 # We'll initialize shared clients/services on startup
 @app.on_event("startup")
@@ -164,7 +229,7 @@ async def get_available_models():
     """Get list of available AI models for chat responses."""
     return {
         "models": [
-              {
+            {
                 "id": "gpt-4o-mini",
                 "name": "GPT-4o Mini",
                 "description": "Efficient GPT-4 variant for quick interactions"
@@ -185,7 +250,7 @@ async def get_available_models():
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, user: AuthenticatedUser = Depends(require_auth)):
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
@@ -210,7 +275,7 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/session/new", response_model=SessionResponse)
-async def create_session():
+async def create_session(user: AuthenticatedUser = Depends(require_auth)):
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
@@ -225,7 +290,7 @@ async def create_session():
 
 
 @app.get("/session/{session_id}/history", response_model=HistoryResponse)
-async def get_conversation_history(session_id: str, limit: int = 10):
+async def get_conversation_history(session_id: str, limit: int = 10, user: AuthenticatedUser = Depends(require_auth)):
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
@@ -240,7 +305,7 @@ async def get_conversation_history(session_id: str, limit: int = 10):
 
 
 @app.delete("/session/{session_id}")
-async def clear_session(session_id: str):
+async def clear_session(session_id: str, user: AuthenticatedUser = Depends(require_auth)):
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
@@ -270,7 +335,6 @@ async def health_check():
             )
 
         # Run all health checks concurrently
-        
         openai_task = asyncio.create_task(rag_service.health_check_openai())
         supabase_task = asyncio.create_task(rag_service.health_check_supabase())
         vector_task = asyncio.create_task(rag_service.health_check_vector_search())
@@ -327,7 +391,7 @@ async def simple_health_check():
 
 
 @app.get("/metrics")
-async def get_metrics():
+async def get_metrics(user: AuthenticatedUser = Depends(require_auth)):
     """
     Production metrics endpoint for monitoring system performance.
     Useful for observability and alerting in production.
@@ -355,28 +419,23 @@ async def get_metrics():
 
 
 @app.post("/chat/stream")
-async def chat_stream(request_data: ChatRequest, request: Request):
+async def chat_stream(
+    request_data: ChatRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_auth_with_tier)
+):
     """
     Production-ready streaming chat endpoint with rate limiting and connection management.
-    
-    Features:
-    - Rate limiting per IP to prevent abuse
-    - Connection management for monitoring active streams
-    - Server-Sent Events (SSE) for real-time responses
-    - Optimized for high concurrent throughput on Render
-    - Compatible with Next.js/React EventSource API
     """
-    # Get client IP for rate limiting
     client_ip = request.client.host if request.client else "unknown"
-    
-    # Apply rate limiting
+
+    # Rate limit
     rate_limiter: TokenBucketRateLimiter = app.state.rate_limiter
     await rate_limiter.check_rate_limit(client_ip)
-    
-    # Generate connection ID for tracking
+
     connection_id = str(uuid.uuid4())
     connection_manager: ConnectionManager = app.state.connection_manager
-    
+
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
@@ -385,41 +444,59 @@ async def chat_stream(request_data: ChatRequest, request: Request):
         # Register connection
         connection_manager.add_connection(connection_id, client_ip)
 
+        # 🔹 Validation: tier vs model restriction
+# 🔹 Validation: tier vs model restriction
+        if user.tier == "basic" and request_data.model != "gpt-4o-mini":
+            async def validation_error_stream():
+                error_event = {
+                    "type": "validation",
+                    "error": "This model is not available on your current tier.",
+                    "timestamp": time.time()
+                }
+                # SSE requires "data: "
+                yield f"data: {json.dumps(error_event)}\n\n"
+                yield "data: [DONE]\n\n"
+
+                # Cleanup connection
+                connection_manager.remove_connection(connection_id)
+
+            return StreamingResponse(
+                validation_error_stream(),
+                media_type="text/plain",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "X-Accel-Buffering": "no",
+                    "X-Connection-ID": connection_id,
+                    "X-User-Tier": user.tier or "",
+                }
+            )
+
+        # Normal SSE generation
         async def generate_sse():
-            """Generate Server-Sent Events for streaming response."""
             try:
-                # GATE HERE
                 if request_data.model == "gpt-4o-mini":
                     stream_gen = rag_service.get_gpt_response_stream
                 else:
                     stream_gen = rag_service.get_grok_response_stream
+
                 async for chunk in stream_gen(
                     user_message=request_data.message,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
                     model=request_data.model,
                 ):
-                    # Update connection activity
                     connection_manager.update_activity(connection_id)
-                    
-                    # Format as SSE
-                    data = json.dumps(chunk, ensure_ascii=False)
-                    yield f"data: {data}\n\n"
-                
-                # Send final SSE close event
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
                 yield "data: [DONE]\n\n"
-                
+
             except Exception as e:
                 logger.exception("Error in SSE generation for connection %s", connection_id)
-                error_data = json.dumps({
-                    "type": "error",
-                    "error": f"Stream generation failed: {str(e)}",
-                    "timestamp": datetime.utcnow().timestamp()
-                })
-                yield f"data: {error_data}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'error': f'Stream generation failed: {str(e)}', 'timestamp': time.time()})}\n\n"
                 yield "data: [DONE]\n\n"
             finally:
-                # Always clean up connection
                 connection_manager.remove_connection(connection_id)
 
         return StreamingResponse(
@@ -429,11 +506,11 @@ async def chat_stream(request_data: ChatRequest, request: Request):
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "Content-Type": "text/plain; charset=utf-8",
-                "X-Accel-Buffering": "no",  # Disable nginx buffering for real-time streaming
+                "X-Accel-Buffering": "no",
                 "X-Connection-ID": connection_id,
+                "X-User-Tier": user.tier or "",
             }
         )
-
     except HTTPException:
         # Clean up connection on HTTP errors
         connection_manager.remove_connection(connection_id)
