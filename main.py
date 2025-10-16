@@ -483,7 +483,7 @@ async def chat_stream(
                     user_message=request_data.message,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
-                    model=-"grok-4-fast-reasoning",
+                    model="grok-4-fast-reasoning",
                 ):
                     connection_manager.update_activity(connection_id)
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
