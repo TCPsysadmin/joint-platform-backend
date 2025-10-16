@@ -223,7 +223,7 @@ class HealthResponse(BaseModel):
 async def root():
     return {"message": "RAG Training Chatbot API is running"}
 
-
+# depreciated
 @app.get("/models")
 async def get_available_models():
     """Get list of available AI models for chat responses."""
@@ -248,7 +248,7 @@ async def get_available_models():
         "default": os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
     }
 
-
+# depreciated
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, user: AuthenticatedUser = Depends(require_auth)):
     try:
@@ -445,47 +445,45 @@ async def chat_stream(
         connection_manager.add_connection(connection_id, client_ip)
 
         # 🔹 Validation: tier vs model restriction
-# 🔹 Validation: tier vs model restriction
-        if user.tier == "basic" and request_data.model != "gpt-4o-mini":
-            async def validation_error_stream():
-                error_event = {
-                    "type": "validation",
-                    "error": "This model is not available on your current tier.",
-                    "timestamp": time.time()
-                }
-                # SSE requires "data: "
-                yield f"data: {json.dumps(error_event)}\n\n"
-                yield "data: [DONE]\n\n"
+        # if user.tier == "basic" and request_data.model != "gpt-4o-mini":
+        #     async def validation_error_stream():
+        #         error_event = {
+        #             "type": "validation",
+        #             "error": "This model is not available on your current tier.",
+        #             "timestamp": time.time()
+        #         }
+        #         # SSE requires "data: "
+        #         yield f"data: {json.dumps(error_event)}\n\n"
+        #         yield "data: [DONE]\n\n"
 
-                # Cleanup connection
-                connection_manager.remove_connection(connection_id)
+        #         # Cleanup connection
+        #         connection_manager.remove_connection(connection_id)
 
-            return StreamingResponse(
-                validation_error_stream(),
-                media_type="text/plain",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "Content-Type": "text/plain; charset=utf-8",
-                    "X-Accel-Buffering": "no",
-                    "X-Connection-ID": connection_id,
-                    "X-User-Tier": user.tier or "",
-                }
-            )
+            # return StreamingResponse(
+            #     # validation_error_stream(),
+            #     media_type="text/plain",
+            #     headers={
+            #         "Cache-Control": "no-cache",
+            #         "Connection": "keep-alive",
+            #         "Content-Type": "text/plain; charset=utf-8",
+            #         "X-Accel-Buffering": "no",
+            #         "X-Connection-ID": connection_id,
+            #         "X-User-Tier": user.tier or "",
+            #     }
+            # )
 
         # Normal SSE generation
         async def generate_sse():
             try:
-                if request_data.model == "gpt-4o-mini":
-                    stream_gen = rag_service.get_gpt_response_stream
-                else:
-                    stream_gen = rag_service.get_grok_response_stream
+                # if request_data.model == "gpt-4o-mini":
+                #     stream_gen = rag_service.get_gpt_response_stream
+                stream_gen = rag_service.get_grok_response_stream
 
                 async for chunk in stream_gen(
                     user_message=request_data.message,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
-                    model=request_data.model,
+                    model=-"grok-4-fast-reasoning",
                 ):
                     connection_manager.update_activity(connection_id)
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
