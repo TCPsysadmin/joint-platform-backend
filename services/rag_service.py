@@ -191,7 +191,7 @@ class RAGService:
             context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
 
             # Build messages
-            system_prompt = prompt_five()  # expects {context}
+            system_prompt = prompt_six()  # expects {context}
             messages = [
                 {"role": "system", "content": system_prompt.format(context=context)},
                 *conversation_history,
@@ -426,7 +426,7 @@ class RAGService:
                 }
 
                 # Build messages for the LLM
-                system_prompt = prompt_five()
+                system_prompt = prompt_six()
                 messages = [
                     {"role": "system", "content": system_prompt.format(context=context)},
                     *conversation_history,
@@ -585,7 +585,7 @@ class RAGService:
                     }
 
                     # Build messages for the LLM
-                    system_prompt = prompt_five()
+                    system_prompt = prompt_six()
                     messages = [
                         system(system_prompt.format(context=context))
                     ]
@@ -598,7 +598,7 @@ class RAGService:
                     messages.append(user(user_message))
 
                     max_tokens = max(32, min(int(max_tokens), 1000))
-                    selected_model = model if model == "grok-3-mini" else "grok-4-fast-reasoning"
+                    selected_model = "grok-4-fast-reasoning"
 
                     t_llm_start = time.monotonic()
                     full_response = ""
