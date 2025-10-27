@@ -112,48 +112,44 @@ class LangChainMemoryService:
         raise RuntimeError(f"Supabase request failed after {self.retry_attempts} attempts: {url}")
 
     async def add_user_message(self, session_id: str, message: str) -> None:
-        payload = [
-            {
-                "session_id": session_id,
-                "message_type": "human",
-                "content": message,
-                "created_at": self._now_iso(),
-            }
-        ]
+        """Add user message using Supabase function."""
+        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/add_user_message"
+        payload = {
+            "session_id_param": session_id,
+            "message_content": message
+        }
         try:
             await self._request_with_retries(
-                "post", "/rest/v1/langchain_chat_history", json=payload
+                "post", rpc_url, json=payload
             )
         except Exception:
             self.logger.exception("Failed to add user message to Supabase")
             raise
 
     async def add_ai_message(self, session_id: str, message: str) -> None:
-        payload = [
-            {
-                "session_id": session_id,
-                "message_type": "ai",
-                "content": message,
-                "created_at": self._now_iso(),
-            }
-        ]
+        """Add AI message using Supabase function."""
+        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/add_ai_message"
+        payload = {
+            "session_id_param": session_id,
+            "message_content": message
+        }
         try:
             await self._request_with_retries(
-                "post", "/rest/v1/langchain_chat_history", json=payload
+                "post", rpc_url, json=payload
             )
         except Exception:
             self.logger.exception("Failed to add AI message to Supabase")
             raise
 
     async def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
-        params = {
-            "session_id": f"eq.{session_id}",
-            "select": "message_type,content,created_at",
-            "order": "created_at.asc",
-            "limit": str(limit),
+        """Get conversation history using Supabase function."""
+        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/get_conversation_history"
+        payload = {
+            "session_id_param": session_id,
+            "message_limit": limit
         }
         try:
-            resp = await self._request_with_retries("get", "/rest/v1/langchain_chat_history", params=params)
+            resp = await self._request_with_retries("post", rpc_url, json=payload)
             data = resp.json()
             if not data:
                 return []
@@ -170,9 +166,13 @@ class LangChainMemoryService:
         return await self.get_conversation_history(session_id, limit)
 
     async def clear_memory(self, session_id: str) -> None:
-        params = {"session_id": f"eq.{session_id}"}
+        """Clear conversation history using Supabase function."""
+        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/clear_conversation_history"
+        payload = {
+            "session_id_param": session_id
+        }
         try:
-            await self._request_with_retries("delete", "/rest/v1/langchain_chat_history", params=params)
+            await self._request_with_retries("post", rpc_url, json=payload)
         except Exception:
             self.logger.exception("Failed to clear memory for session %s", session_id)
             raise
