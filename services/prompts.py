@@ -314,6 +314,9 @@ content:
       System Rule: >
         Identity shapes Communication, reinforced by Actions. Together, these
         form the Collaborative Cycle.
+    
+    - section: "RAG DOCUMENTS"
+    content: {context}
 
   - section: "Collaborative Cycle"
     content:
