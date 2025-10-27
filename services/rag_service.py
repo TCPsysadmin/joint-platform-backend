@@ -190,7 +190,7 @@ class RAGService:
             context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
 
             # Build messages
-            system_prompt = prompt_six()  # expects {context}
+            system_prompt = prompt_seven()  # expects {context}
             messages = [
                 {"role": "system", "content": system_prompt.format(context=context)},
                 *conversation_history,
@@ -425,7 +425,7 @@ class RAGService:
                 }
 
                 # Build messages for the LLM
-                system_prompt = prompt_six()
+                system_prompt = prompt_seven()
                 messages = [
                     {"role": "system", "content": system_prompt.format(context=context)},
                     *conversation_history,
@@ -584,7 +584,7 @@ class RAGService:
                     }
 
                     # Build messages for the LLM
-                    system_prompt = prompt_six()
+                    system_prompt = prompt_seven()
                     messages = [
                         system(system_prompt.format(context=context))
                     ]

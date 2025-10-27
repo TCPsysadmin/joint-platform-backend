@@ -255,7 +255,7 @@ async def chat(request: ChatRequest, user: AuthenticatedUser = Depends(require_a
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
             raise HTTPException(status_code=503, detail="Service unavailable")
-        response = await rag_service.get_rag_response(
+        response = await rag_service.get_grok_response_stream_rag_response(
             user_message=request.message,
             session_id=request.session_id,
             max_tokens=request.max_tokens,
