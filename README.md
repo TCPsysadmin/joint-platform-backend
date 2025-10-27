@@ -102,8 +102,7 @@ docker run -d \
 #### Optional (with defaults)
 - `OPENAI_MODEL_NAME`: Model to use (default: `gpt-4o-mini`)
 - `OPENAI_TEMPERATURE`: Response creativity (default: `0.5`)
-- `SUPABASE_MATCH_FN`: Vector search function (default: `match_documents_justin`)
-- `SUPABASE_MATCH_THRESHOLD`: Similarity threshold (default: `0.4`)
+- `SUPABASE_MATCH_FN`: Vector search function (default: `tcpdb_v2_search_tuned`)
 - `CORS_ALLOWED_ORIGINS`: Comma-separated frontend URLs (default: `*`)
 
 #### Production Tuning

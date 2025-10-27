@@ -17,12 +17,11 @@ from .prompts import *
 
 # ---- Constants / Config ----
 MAX_MESSAGES = 20
-TOP_K = 4  # retrieval top-k (keep small for latency/cost)
+TOP_K = 3  # retrieval top-k (keep small for latency/cost)
 CONTEXT_CHAR_BUDGET = 36000  # ~character budget; consider switching to token-based trimming
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "match_documents_justin")  # make configurable
-MATCH_THRESHOLD = float(os.getenv("SUPABASE_MATCH_THRESHOLD", "0.4"))
+SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search_tuned")  # make configurable
 MAX_GROK_REQUESTS = 40
 
 ACRONYM_MAP = {
@@ -133,8 +132,9 @@ class RAGService:
         rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/{SUPABASE_MATCH_FN}"
         payload = {
             "query_embedding": query_embedding,
-            "match_threshold": MATCH_THRESHOLD,
             "match_count": limit,
+            "filter": {},
+            "ef_search": 60
         }
 
         # simple retry loop for the HTTP RPC call
@@ -352,7 +352,8 @@ class RAGService:
                 "status": "healthy",
                 "response_time_ms": round(response_time * 1000, 2),
                 "results_count": len(results),
-                "function": SUPABASE_MATCH_FN
+                "function": SUPABASE_MATCH_FN,
+                "ef_search": 60
             }
         except Exception as e:
             response_time = time.monotonic() - start_time
@@ -436,7 +437,7 @@ class RAGService:
                 max_tokens = max(32, min(int(max_tokens), 1000))
                 selected_model = model if model else MODEL_NAME
 
-                # valid_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o-mini"]
+                valid_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o-mini"]
                 if model != "gpt-4o-mini":
                     yield {
                         "type": "error",

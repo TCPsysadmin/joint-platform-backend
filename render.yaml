@@ -20,9 +20,7 @@ services:
       - key: OPENAI_TEMPERATURE
         value: 0.5
       - key: SUPABASE_MATCH_FN
-        value: match_documents_justin
-      - key: SUPABASE_MATCH_THRESHOLD
-        value: 0.4
+        value: tcpdb_v2_search_tuned
       - key: RATE_LIMIT_RPM
         value: 60
       - key: RATE_LIMIT_BURST
