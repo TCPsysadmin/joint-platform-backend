@@ -596,7 +596,8 @@ class RAGService:
                             messages.append(user(msg["content"]))
                     messages.append(user(user_message))
 
-                    max_tokens = max(32, min(int(max_tokens), 1000))
+                    # max_tokens = max(32, min(int(max_tokens), 1000))
+                    max_tokens = 1500
                     selected_model = "grok-4-fast-reasoning"
 
                     t_llm_start = time.monotonic()
@@ -633,12 +634,12 @@ class RAGService:
                         }
                         return
 
-                    t_llm = time.monotonic() - t_llm_start
+                    # t_llm = time.monotonic() - t_llm_start
                     # Save the full AI response
                     if full_response:
                         await self.memory_service.add_ai_message(session_id, full_response)
 
-                    t_total = time.monotonic() - t0
+                    # t_total = time.monotonic() - t0
                     # self.logger.info(
                     #     "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
                     #     session_id, t_embed, t_io, t_llm, t_total
