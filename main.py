@@ -6,6 +6,7 @@ import json
 import time
 import asyncio
 import httpx
+from base64 import b64decode
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
@@ -16,7 +17,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, constr
 from starlette.middleware.base import BaseHTTPMiddleware
 import jwt  # PyJWT
-
+from services.encryption import AESEncryptor
 from services.rag_service import RAGService
 from services.rate_limiter import TokenBucketRateLimiter, ConnectionManager
 
@@ -24,10 +25,10 @@ from services.rate_limiter import TokenBucketRateLimiter, ConnectionManager
 load_dotenv()
 
 logger = logging.getLogger("uvicorn.error")
-
+encryptor = AESEncryptor(b64decode(os.getenv("ENCRYPTION_KEY")))
 app = FastAPI(
     title="RAG Training Chatbot API",
-    description="A simple RAG-based chatbot for employee training with PostgreSQL memory",
+    description="TCP CO-Pilot, Dr. Carlo Riolo as your digitized partner",
     version="1.0.0",
 )
 
@@ -154,7 +155,7 @@ async def startup_event():
         ),
     )
 
-    app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger)
+    app.state.rag_service = RAGService(client=app.state.httpx_client, logger=logger, encryptor=encryptor)
     
     # Initialize production rate limiting and connection management
     app.state.rate_limiter = TokenBucketRateLimiter(

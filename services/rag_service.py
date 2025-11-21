@@ -14,6 +14,7 @@ from xai_sdk import AsyncClient
 from xai_sdk.chat import user, system, assistant
 from .langchain_memory import LangChainMemoryService
 from .prompts import *
+from .encryption import AESEncryptor
 
 # ---- Constants / Config ----
 MAX_MESSAGES = 20
@@ -58,7 +59,7 @@ def pack_context(docs: List[Dict[str, Any]], char_budget: int = CONTEXT_CHAR_BUD
 
 
 class RAGService:
-    def __init__(self, client: httpx.AsyncClient, logger: Optional[logging.Logger] = None):
+    def __init__(self, client: httpx.AsyncClient, logger: Optional[logging.Logger] = None, encryptor: AESEncryptor = None):
         self.client = client
         self.logger = logger or logging.getLogger("uvicorn.error")
 
@@ -88,6 +89,7 @@ class RAGService:
             supabase_key=self.supabase_key,
             client=self.client,
             logger=self.logger,
+            encryptor=encryptor
         )
 
     async def aclose(self):
@@ -524,7 +526,7 @@ class RAGService:
                 self,
                 user_message: str,
                 session_id: Optional[str] = None,
-                max_tokens: int = 700,
+                max_tokens: int = 1500,
                 model: Optional[str] = None
             ) -> AsyncGenerator[Dict[str, Any], None]:
                 """Generate a streaming RAG-based AI response using Server-Sent Events."""
@@ -598,7 +600,7 @@ class RAGService:
 
                     # max_tokens = max(32, min(int(max_tokens), 1000))
                     max_tokens = 1500
-                    selected_model = "grok-4-fast-reasoning"
+                    selected_model = "grok-4-1-fast-reasoning"
 
                     t_llm_start = time.monotonic()
                     full_response = ""

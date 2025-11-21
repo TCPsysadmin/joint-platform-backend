@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 import httpx
-
+from .encryption import AESEncryptor
 
 class LangChainMemoryService:
     """
@@ -20,6 +20,7 @@ class LangChainMemoryService:
         supabase_url: str,
         supabase_key: str,
         client: httpx.AsyncClient,
+        encryptor: AESEncryptor, 
         logger: Optional[logging.Logger] = None,
         request_timeout: float = 10.0,
         retry_attempts: int = 3,
@@ -33,6 +34,7 @@ class LangChainMemoryService:
         self.logger = logger or logging.getLogger("langchain_memory")
         self.request_timeout = request_timeout
         self.retry_attempts = max(1, int(retry_attempts))
+        self.encryptor = encryptor
 
         self.supabase_headers = {
             "apikey": self.supabase_key,
@@ -111,6 +113,9 @@ class LangChainMemoryService:
         # After retries exhausted
         raise RuntimeError(f"Supabase request failed after {self.retry_attempts} attempts: {url}")
 
+    """
+    OLD VERSION
+    """
     async def add_user_message(self, session_id: str, message: str) -> None:
         """Add user message using Supabase function."""
         rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/add_user_message"
@@ -126,6 +131,9 @@ class LangChainMemoryService:
             self.logger.exception("Failed to add user message to Supabase")
             raise
 
+    """
+    OLD VERSION
+    """
     async def add_ai_message(self, session_id: str, message: str) -> None:
         """Add AI message using Supabase function."""
         rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/add_ai_message"
@@ -141,6 +149,9 @@ class LangChainMemoryService:
             self.logger.exception("Failed to add AI message to Supabase")
             raise
 
+    """
+    OLD VERSION
+    """
     async def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
         """Get conversation history using Supabase function."""
         rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/get_conversation_history"
@@ -161,6 +172,93 @@ class LangChainMemoryService:
         except Exception:
             self.logger.exception("Failed to fetch conversation history from Supabase")
             return []
+    """
+    UPDATED VERSION
+    """
+    # async def add_user_message(self, session_id: str, message: str) -> None:
+    #     """
+    #     Encrypts and stores a user message in Supabase.
+    #     """
+    #     encrypted = self.encryptor.encrypt(message)
+
+    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_user_message"
+
+    #     payload = {
+    #         "session_id_param": session_id,
+    #         "ciphertext_param": encrypted["ciphertext"],
+    #         "nonce_param": encrypted["nonce"]
+    #     }
+
+    #     try:
+    #         await self._request_with_retries(
+    #             "post", rpc_url, json=payload
+    #         )
+    #     except Exception:
+    #         self.logger.exception("Failed to add encrypted user message to Supabase")
+    #         raise
+    """
+    UPDATED VERSION
+    """
+    # async def add_ai_message(self, session_id: str, message: str) -> None:
+    #     """
+    #     Encrypts and stores an AI-generated message in Supabase.
+    #     """
+    #     encrypted = self.encryptor.encrypt(message)
+
+    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_ai_message"
+
+    #     payload = {
+    #         "session_id_param": session_id,
+    #         "ciphertext_param": encrypted["ciphertext"],
+    #         "nonce_param": encrypted["nonce"]
+    #     }
+
+    #     try:
+    #         await self._request_with_retries(
+    #             "post", rpc_url, json=payload
+    #         )
+    #     except Exception:
+    #         self.logger.exception("Failed to add encrypted AI message to Supabase")
+    #         raise
+
+    """
+    UPDATED VERSION
+    """
+    # async def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
+    #     """
+    #     Fetches encrypted messages from Supabase and decrypts them before returning.
+    #     """
+    #     rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/get_conversation_history"
+    #     payload = {
+    #         "session_id_param": session_id,
+    #         "message_limit": limit
+    #     }
+
+    #     try:
+    #         resp = await self._request_with_retries("post", rpc_url, json=payload)
+    #         data = resp.json()
+
+    #         if not data:
+    #             return []
+
+    #         messages = []
+    #         for msg in data:
+    #             # Decrypt using backend AES encryptor
+    #             plaintext = self.encryptor.decrypt(
+    #                 msg["ciphertext"],
+    #                 msg["nonce"]
+    #             )
+
+    #             messages.append({
+    #                 "role": "user" if msg["message_type"] == "human" else "assistant",
+    #                 "content": plaintext
+    #             })
+
+    #         return messages
+
+    #     except Exception:
+    #         self.logger.exception("Failed to fetch or decrypt conversation history")
+    #         return []
 
     async def format_messages_for_openai(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
         return await self.get_conversation_history(session_id, limit)
