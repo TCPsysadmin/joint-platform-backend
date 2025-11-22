@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import uuid
+import tiktoken
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -11,8 +12,8 @@ from .encryption import AESEncryptor
 class LangChainMemoryService:
     """
     Memory service that stores conversation history in Supabase (via REST).
-    This version expects the Supabase URL/key and a shared httpx.AsyncClient to be
-    passed in at construction (no dotenv loading here).
+    Updated to work with new schema: chat_sessions + chat_messages tables.
+    Supports contact_id, UUID session_id, token-based trimming, and session summaries.
     """
 
     def __init__(
@@ -35,6 +36,13 @@ class LangChainMemoryService:
         self.request_timeout = request_timeout
         self.retry_attempts = max(1, int(retry_attempts))
         self.encryptor = encryptor
+        
+        # Initialize tiktoken encoder for token counting (using cl100k_base for GPT-4/Grok)
+        try:
+            self.token_encoder = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            self.logger.warning("Failed to load tiktoken, falling back to character-based estimation")
+            self.token_encoder = None
 
         self.supabase_headers = {
             "apikey": self.supabase_key,
@@ -44,6 +52,13 @@ class LangChainMemoryService:
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens in text. Falls back to character/4 estimation if tiktoken unavailable."""
+        if self.token_encoder:
+            return len(self.token_encoder.encode(text))
+        # Fallback: rough estimation (1 token ≈ 4 characters)
+        return len(text) // 4
 
     async def _request_with_retries(
         self,
@@ -56,7 +71,7 @@ class LangChainMemoryService:
         """
         Generic HTTP request wrapper with retries for Supabase operations.
         method should be "get", "post", or "delete".
-        path_or_url can be a full URL or a path (e.g. "/rest/v1/langchain_chat_history")
+        path_or_url can be a full URL or a path (e.g. "/rest/v1/rpc/create_session")
         """
         if path_or_url.lower().startswith("http"):
             url = path_or_url
@@ -87,13 +102,25 @@ class LangChainMemoryService:
             except httpx.HTTPStatusError as e:
                 # 4xx errors are usually client errors — don't keep retrying
                 status = getattr(e.response, "status_code", None)
-                self.logger.exception(
-                    "Supabase HTTP status error (attempt %s/%s) url=%s status=%s",
-                    attempt + 1,
-                    self.retry_attempts,
-                    url,
-                    status,
-                )
+                # Log the actual error response body for debugging
+                try:
+                    error_body = e.response.text
+                    self.logger.error(
+                        "Supabase HTTP status error (attempt %s/%s) url=%s status=%s body=%s",
+                        attempt + 1,
+                        self.retry_attempts,
+                        url,
+                        status,
+                        error_body,
+                    )
+                except:
+                    self.logger.error(
+                        "Supabase HTTP status error (attempt %s/%s) url=%s status=%s",
+                        attempt + 1,
+                        self.retry_attempts,
+                        url,
+                        status,
+                    )
                 if status and 400 <= status < 500:
                     # Bubble it up — payload or authorization issue
                     raise
@@ -113,164 +140,498 @@ class LangChainMemoryService:
         # After retries exhausted
         raise RuntimeError(f"Supabase request failed after {self.retry_attempts} attempts: {url}")
 
-    """
-    OLD VERSION
-    """
-    async def add_user_message(self, session_id: str, message: str) -> None:
-        """Add user message using Supabase function."""
-        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/add_user_message"
-        payload = {
-            "session_id_param": session_id,
-            "message_content": message
+    # ============================================================================
+    # SESSION MANAGEMENT
+    # ============================================================================
+
+    async def create_session(self, contact_id: str) -> str:
+        """
+        Create a new chat session for a user and return the session_id (UUID as string).
+        After creating, evicts old sessions to keep only 10 most recent.
+        """
+        rpc_url = f"{self.supabase_url}/rest/v1/rpc/create_session"
+        payload = {"p_contact_id": contact_id}
+        try:
+            resp = await self._request_with_retries("post", rpc_url, json=payload)
+            session_id = resp.json()
+            session_id = str(session_id) if session_id else str(uuid.uuid4())
+            
+            # Evict old sessions to keep only 10 most recent (runs in background)
+            asyncio.create_task(self.evict_old_sessions(contact_id))
+            
+            return session_id
+        except Exception:
+            self.logger.exception("Failed to create session in Supabase")
+            raise
+
+    async def evict_old_sessions(self, contact_id: str) -> None:
+        """
+        Evict old sessions, keeping only the 10 most recent for a user.
+        This is called automatically after creating new sessions.
+        """
+        rpc_url = f"{self.supabase_url}/rest/v1/rpc/evict_old_sessions"
+        payload = {"p_contact_id": contact_id}
+        try:
+            await self._request_with_retries("post", rpc_url, json=payload)
+            self.logger.debug("Evicted old sessions for contact_id: %s", contact_id)
+        except Exception:
+            # Don't fail if eviction fails - log and continue
+            self.logger.warning("Failed to evict old sessions for contact_id: %s", contact_id, exc_info=True)
+
+    async def get_recent_sessions(self, contact_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get the N most recent sessions for a user, ordered by last_message_at DESC.
+        Returns list of session dicts with: id, contact_id, created_at, last_message_at, title, summary, is_archived
+        """
+        url = f"{self.supabase_url}/rest/v1/chat_sessions"
+        params = {
+            "contact_id": f"eq.{contact_id}",
+            "order": "last_message_at.desc",
+            "limit": str(limit),
+            "select": "id,contact_id,created_at,last_message_at,title,summary,is_archived"
         }
         try:
-            await self._request_with_retries(
-                "post", rpc_url, json=payload
-            )
+            resp = await self._request_with_retries("get", url, params=params)
+            return resp.json() if resp.json() else []
+        except httpx.HTTPStatusError as e:
+            # Log the actual error response body - this will tell us exactly what Supabase is complaining about
+            error_detail = "Unknown error"
+            try:
+                error_detail = e.response.text
+                error_json = e.response.json() if e.response.headers.get("content-type", "").startswith("application/json") else None
+                if error_json:
+                    self.logger.error("Supabase JSON error: %s", error_json)
+                else:
+                    self.logger.error("Supabase error response text: %s", error_detail)
+            except Exception as log_err:
+                self.logger.error("Could not parse error response: %s", str(log_err))
+            self.logger.exception("Failed to fetch recent sessions from Supabase (status=%s): %s", 
+                                e.response.status_code if hasattr(e.response, 'status_code') else 'unknown',
+                                error_detail)
+            return []
+        except Exception as e:
+            self.logger.exception("Failed to fetch recent sessions from Supabase: %s", str(e))
+            return []
+
+    async def get_session_metadata(
+        self, 
+        session_id: str, 
+        contact_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get session metadata including summary info.
+        Returns dict with: summary, summary_updated_at, summary_last_message_id
+        """
+        url = f"{self.supabase_url}/rest/v1/chat_sessions"
+        params = {
+            "id": f"eq.{session_id}",
+            "contact_id": f"eq.{contact_id}",
+            "select": "summary,summary_updated_at,summary_last_message_id"
+        }
+        try:
+            resp = await self._request_with_retries("get", url, params=params)
+            data = resp.json()
+            if data and len(data) > 0:
+                return data[0]
+            return None
+        except Exception:
+            self.logger.exception("Failed to fetch session metadata from Supabase")
+            return None
+
+    async def get_session_summary(self, session_id: str, contact_id: str) -> Optional[str]:
+        """
+        Get the summary for a specific session if it exists.
+        """
+        metadata = await self.get_session_metadata(session_id, contact_id)
+        return metadata.get("summary") if metadata else None
+
+    async def get_messages_since_summary(
+        self,
+        session_id: str,
+        contact_id: str,
+        summary_last_message_id: Optional[int]
+    ) -> List[Dict[str, Any]]:
+        """
+        Get messages that have been added since the last summary.
+        If summary_last_message_id is None, returns all messages.
+        """
+        # Get all recent messages
+        all_messages = await self.get_recent_messages(session_id, contact_id, limit=200)
+        
+        if summary_last_message_id is None:
+            # No previous summary, return all messages
+            return all_messages
+        
+        # Filter to only messages after the last summarized message
+        # Messages are returned newest first, so we need to find where to cut
+        messages_since = []
+        for msg in all_messages:
+            # Assuming message has an 'id' field - we may need to adjust based on actual DB response
+            msg_id = msg.get("id")
+            if msg_id and msg_id > summary_last_message_id:
+                messages_since.append(msg)
+            elif msg_id is None:
+                # If no ID field, we can't filter - return all (safer)
+                return all_messages
+        
+        return messages_since
+
+    async def should_update_summary(
+        self,
+        session_id: str,
+        contact_id: str,
+        message_count_threshold: int = 12,
+        token_count_threshold: int = 1500
+    ) -> tuple:
+        """
+        Check if session summary should be updated.
+        
+        Returns:
+            (should_update, session_metadata, new_messages)
+        """
+        metadata = await self.get_session_metadata(session_id, contact_id)
+        if not metadata:
+            return False, None, []
+        
+        summary_last_message_id = metadata.get("summary_last_message_id")
+        new_messages = await self.get_messages_since_summary(
+            session_id, contact_id, summary_last_message_id
+        )
+        
+        if not new_messages:
+            return False, metadata, []
+        
+        # Check message count threshold
+        if len(new_messages) >= message_count_threshold:
+            return True, metadata, new_messages
+        
+        # Check token count threshold
+        total_tokens = sum(self._count_tokens(msg.get("content", "")) for msg in new_messages)
+        if total_tokens >= token_count_threshold:
+            return True, metadata, new_messages
+        
+        return False, metadata, new_messages
+
+    async def update_session_summary(
+        self,
+        session_id: str,
+        contact_id: str,
+        summary: str,
+        last_message_id: int,
+        title: Optional[str] = None
+    ) -> None:
+        """
+        Update the session summary (and optionally title) in the database.
+        
+        Args:
+            session_id: Session ID
+            contact_id: User's contact ID
+            summary: The session summary text
+            last_message_id: ID of the last message included in the summary
+            title: Optional title to update (if None, title is not updated)
+        """
+        url = f"{self.supabase_url}/rest/v1/chat_sessions"
+        params = {
+            "id": f"eq.{session_id}",
+            "contact_id": f"eq.{contact_id}"
+        }
+        payload = {
+            "summary": summary,
+            "summary_updated_at": self._now_iso(),
+            "summary_last_message_id": last_message_id
+        }
+        # Only update title if provided
+        if title is not None:
+            payload["title"] = title
+        
+        try:
+            await self._request_with_retries("patch", url, params=params, json=payload)
+            if title:
+                self.logger.info("Updated session summary and title for session %s", session_id)
+            else:
+                self.logger.info("Updated session summary for session %s", session_id)
+        except Exception:
+            self.logger.exception("Failed to update session summary in Supabase")
+            raise
+
+    # ============================================================================
+    # MESSAGE MANAGEMENT (CURRENT VERSION - PLAINTEXT)
+    # ============================================================================
+
+    async def add_user_message(self, session_id: str, contact_id: str, message: str) -> None:
+        """
+        Add a user message to a session.
+        Uses the new add_message RPC function with contact_id support.
+        This updates last_message_at, which affects session ordering.
+        """
+        rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_message"
+        payload = {
+            "p_session_id": session_id,
+            "p_contact_id": contact_id,
+            "p_role": "human",
+            "p_content": message
+        }
+        try:
+            await self._request_with_retries("post", rpc_url, json=payload)
+            # Evict old sessions after adding message (runs in background)
+            # This ensures we keep only 10 most recent active sessions
+            asyncio.create_task(self.evict_old_sessions(contact_id))
         except Exception:
             self.logger.exception("Failed to add user message to Supabase")
             raise
 
-    """
-    OLD VERSION
-    """
-    async def add_ai_message(self, session_id: str, message: str) -> None:
-        """Add AI message using Supabase function."""
-        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/add_ai_message"
+    async def add_ai_message(self, session_id: str, contact_id: str, message: str) -> None:
+        """
+        Add an AI message to a session.
+        Uses the new add_message RPC function with contact_id support.
+        """
+        rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_message"
         payload = {
-            "session_id_param": session_id,
-            "message_content": message
-        }
-        try:
-            await self._request_with_retries(
-                "post", rpc_url, json=payload
-            )
-        except Exception:
-            self.logger.exception("Failed to add AI message to Supabase")
-            raise
-
-    """
-    OLD VERSION
-    """
-    async def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
-        """Get conversation history using Supabase function."""
-        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/get_conversation_history"
-        payload = {
-            "session_id_param": session_id,
-            "message_limit": limit
-        }
-        try:
-            resp = await self._request_with_retries("post", rpc_url, json=payload)
-            data = resp.json()
-            if not data:
-                return []
-            # Format for OpenAI (role/content)
-            return [
-                {"role": "user" if msg["message_type"] == "human" else "assistant", "content": msg["content"]}
-                for msg in data
-            ]
-        except Exception:
-            self.logger.exception("Failed to fetch conversation history from Supabase")
-            return []
-    """
-    UPDATED VERSION
-    """
-    # async def add_user_message(self, session_id: str, message: str) -> None:
-    #     """
-    #     Encrypts and stores a user message in Supabase.
-    #     """
-    #     encrypted = self.encryptor.encrypt(message)
-
-    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_user_message"
-
-    #     payload = {
-    #         "session_id_param": session_id,
-    #         "ciphertext_param": encrypted["ciphertext"],
-    #         "nonce_param": encrypted["nonce"]
-    #     }
-
-    #     try:
-    #         await self._request_with_retries(
-    #             "post", rpc_url, json=payload
-    #         )
-    #     except Exception:
-    #         self.logger.exception("Failed to add encrypted user message to Supabase")
-    #         raise
-    """
-    UPDATED VERSION
-    """
-    # async def add_ai_message(self, session_id: str, message: str) -> None:
-    #     """
-    #     Encrypts and stores an AI-generated message in Supabase.
-    #     """
-    #     encrypted = self.encryptor.encrypt(message)
-
-    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_ai_message"
-
-    #     payload = {
-    #         "session_id_param": session_id,
-    #         "ciphertext_param": encrypted["ciphertext"],
-    #         "nonce_param": encrypted["nonce"]
-    #     }
-
-    #     try:
-    #         await self._request_with_retries(
-    #             "post", rpc_url, json=payload
-    #         )
-    #     except Exception:
-    #         self.logger.exception("Failed to add encrypted AI message to Supabase")
-    #         raise
-
-    """
-    UPDATED VERSION
-    """
-    # async def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
-    #     """
-    #     Fetches encrypted messages from Supabase and decrypts them before returning.
-    #     """
-    #     rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/get_conversation_history"
-    #     payload = {
-    #         "session_id_param": session_id,
-    #         "message_limit": limit
-    #     }
-
-    #     try:
-    #         resp = await self._request_with_retries("post", rpc_url, json=payload)
-    #         data = resp.json()
-
-    #         if not data:
-    #             return []
-
-    #         messages = []
-    #         for msg in data:
-    #             # Decrypt using backend AES encryptor
-    #             plaintext = self.encryptor.decrypt(
-    #                 msg["ciphertext"],
-    #                 msg["nonce"]
-    #             )
-
-    #             messages.append({
-    #                 "role": "user" if msg["message_type"] == "human" else "assistant",
-    #                 "content": plaintext
-    #             })
-
-    #         return messages
-
-    #     except Exception:
-    #         self.logger.exception("Failed to fetch or decrypt conversation history")
-    #         return []
-
-    async def format_messages_for_openai(self, session_id: str, limit: int = 10) -> List[Dict[str, str]]:
-        return await self.get_conversation_history(session_id, limit)
-
-    async def clear_memory(self, session_id: str) -> None:
-        """Clear conversation history using Supabase function."""
-        rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/clear_conversation_history"
-        payload = {
-            "session_id_param": session_id
+            "p_session_id": session_id,
+            "p_contact_id": contact_id,
+            "p_role": "ai",
+            "p_content": message
         }
         try:
             await self._request_with_retries("post", rpc_url, json=payload)
         except Exception:
+            self.logger.exception("Failed to add AI message to Supabase")
+            raise
+
+    async def get_recent_messages(
+        self, 
+        session_id: str, 
+        contact_id: str, 
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get recent messages for a session (newest first).
+        Returns raw messages with role, content, created_at, and id (if available).
+        Uses direct table query to get message IDs for summary tracking.
+        """
+        # Query chat_messages table directly to get IDs
+        url = f"{self.supabase_url}/rest/v1/chat_messages"
+        params = {
+            "session_id": f"eq.{session_id}",
+            "contact_id": f"eq.{contact_id}",
+            "order": "created_at.desc",
+            "limit": str(limit),
+            "select": "id,role,content,created_at"
+        }
+        try:
+            resp = await self._request_with_retries("get", url, params=params)
+            data = resp.json()
+            return data if data else []
+        except Exception:
+            self.logger.exception("Failed to fetch recent messages from Supabase")
+            return []
+
+    async def get_conversation_history(
+        self, 
+        session_id: str, 
+        contact_id: str,
+        max_tokens: Optional[int] = None,
+        include_summary: bool = True
+    ) -> List[Dict[str, str]]:
+        """
+        Get conversation history with token-based trimming.
+        
+        Args:
+            session_id: UUID of the session
+            contact_id: User's contact ID
+            max_tokens: Maximum tokens to include (if None, returns all messages)
+            include_summary: Whether to include session summary as a system message
+        
+        Returns:
+            List of message dicts with role/content, ordered chronologically (oldest first).
+            If include_summary=True and summary exists, includes it as first message with role="system".
+        """
+        # Fetch session summary and messages in parallel for better performance
+        # Estimate: 800 tokens ≈ 50-100 messages, so fetch 100 max
+        fetch_limit = 100 if max_tokens and max_tokens <= 1000 else 200
+        
+        if include_summary:
+            summary_task = asyncio.create_task(
+                self.get_session_summary(session_id, contact_id)
+            )
+            messages_task = asyncio.create_task(
+                self.get_recent_messages(session_id, contact_id, limit=fetch_limit)
+            )
+            summary, messages_raw = await asyncio.gather(summary_task, messages_task)
+        else:
+            summary = None
+            messages_raw = await self.get_recent_messages(session_id, contact_id, limit=fetch_limit)
+        
+        if not messages_raw:
+            # If no messages but we have a summary, return just the summary
+            if summary:
+                return [{"role": "system", "content": f"Previous conversation summary: {summary}"}]
+            return []
+
+        # Format messages and build result list
+        # messages_raw is ordered newest first, so we start from most recent and work backwards
+        messages = []
+        total_tokens = 0
+
+        # Add summary as first message if available (before recent messages)
+        if summary:
+            summary_msg = f"Previous conversation summary: {summary}"
+            summary_tokens = self._count_tokens(summary_msg)
+            if max_tokens is None or summary_tokens <= max_tokens:
+                messages.append({"role": "system", "content": summary_msg})
+                total_tokens += summary_tokens
+
+        # Collect messages starting from most recent and working backwards
+        # messages_raw is already ordered newest first, so we iterate from start (newest) to end (oldest)
+        # Optimize: Only count tokens for messages we'll actually include
+        messages_to_include = []
+        for msg in messages_raw:
+            role = "user" if msg["role"] == "human" else "assistant"
+            content = msg["content"]
+            
+            if max_tokens is not None:
+                # Count tokens only if we might use this message
+                msg_tokens = self._count_tokens(content)
+                if total_tokens + msg_tokens > max_tokens:
+                    # Stop if adding this message would exceed limit
+                    # We've hit the limit working backwards from most recent
+                    break
+                total_tokens += msg_tokens
+            else:
+                # If no token limit, just estimate (don't count every message)
+                total_tokens += len(content) // 4  # Rough estimate
+            
+            # Append to list (will be in reverse chronological order: newest first)
+            messages_to_include.append({"role": role, "content": content})
+
+        # Reverse to get chronological order (oldest first) for LLM context
+        messages_to_include.reverse()
+        messages.extend(messages_to_include)
+
+        return messages
+
+    async def format_messages_for_openai(
+        self, 
+        session_id: str, 
+        contact_id: str,
+        max_tokens: Optional[int] = None,
+        include_summary: bool = True
+    ) -> List[Dict[str, str]]:
+        """Alias for get_conversation_history for backward compatibility."""
+        return await self.get_conversation_history(session_id, contact_id, max_tokens, include_summary)
+
+    async def clear_memory(self, session_id: str, contact_id: str) -> None:
+        """
+        Clear all messages in a session.
+        Note: This doesn't delete the session itself, just the messages.
+        For full session deletion, you'd need to delete from chat_sessions table.
+        """
+        # Since we don't have a clear_session_messages function, we'll delete via direct table access
+        url = f"{self.supabase_url}/rest/v1/chat_messages"
+        params = {
+            "session_id": f"eq.{session_id}",
+            "contact_id": f"eq.{contact_id}"
+        }
+        try:
+            await self._request_with_retries("delete", url, params=params)
+        except Exception:
             self.logger.exception("Failed to clear memory for session %s", session_id)
             raise
+
+    # ============================================================================
+    # ENCRYPTION VERSIONS (COMMENTED - READY FOR WHEN DB SCHEMA SUPPORTS IT)
+    # ============================================================================
+
+    """
+    ENCRYPTED VERSION - READY FOR WHEN DB SCHEMA IS UPDATED
+    These methods will encrypt/decrypt messages when the database schema
+    is updated to support ciphertext and nonce columns.
+    
+    To enable:
+    1. Update chat_messages table to have ciphertext and nonce columns
+    2. Update add_message RPC to accept ciphertext/nonce params
+    3. Update get_recent_messages to return ciphertext/nonce
+    4. Uncomment these methods and comment out the plaintext versions above
+    """
+
+    # async def add_user_message(self, session_id: str, contact_id: str, message: str) -> None:
+    #     """
+    #     Encrypts and stores a user message in Supabase.
+    #     """
+    #     encrypted = self.encryptor.encrypt(message)
+    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_message"
+    #     payload = {
+    #         "p_session_id": session_id,
+    #         "p_contact_id": contact_id,
+    #         "p_role": "human",
+    #         "p_ciphertext": encrypted["ciphertext"],
+    #         "p_nonce": encrypted["nonce"]
+    #     }
+    #     try:
+    #         await self._request_with_retries("post", rpc_url, json=payload)
+    #     except Exception:
+    #         self.logger.exception("Failed to add encrypted user message to Supabase")
+    #         raise
+
+    # async def add_ai_message(self, session_id: str, contact_id: str, message: str) -> None:
+    #     """
+    #     Encrypts and stores an AI-generated message in Supabase.
+    #     """
+    #     encrypted = self.encryptor.encrypt(message)
+    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_message"
+    #     payload = {
+    #         "p_session_id": session_id,
+    #         "p_contact_id": contact_id,
+    #         "p_role": "ai",
+    #         "p_ciphertext": encrypted["ciphertext"],
+    #         "p_nonce": encrypted["nonce"]
+    #     }
+    #     try:
+    #         await self._request_with_retries("post", rpc_url, json=payload)
+    #     except Exception:
+    #         self.logger.exception("Failed to add encrypted AI message to Supabase")
+    #         raise
+
+    # async def get_recent_messages(
+    #     self, 
+    #     session_id: str, 
+    #     contact_id: str, 
+    #     limit: int = 100
+    # ) -> List[Dict[str, Any]]:
+    #     """
+    #     Get recent messages and decrypt them.
+    #     Returns messages with decrypted content.
+    #     """
+    #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/get_recent_messages"
+    #     payload = {
+    #         "p_session_id": session_id,
+    #         "p_contact_id": contact_id,
+    #         "p_limit": limit
+    #     }
+    #     try:
+    #         resp = await self._request_with_retries("post", rpc_url, json=payload)
+    #         data = resp.json()
+    #         if not data:
+    #             return []
+    #         
+    #         # Decrypt each message
+    #         decrypted_messages = []
+    #         for msg in data:
+    #             try:
+    #                 plaintext = self.encryptor.decrypt(
+    #                     msg["ciphertext"],
+    #                     msg["nonce"]
+    #                 )
+    #                 decrypted_messages.append({
+    #                     "role": msg["role"],
+    #                     "content": plaintext,
+    #                     "created_at": msg["created_at"]
+    #                 })
+    #             except Exception as e:
+    #                 self.logger.warning("Failed to decrypt message: %s", e)
+    #                 continue
+    #         
+    #         return decrypted_messages
+    #     except Exception:
+    #         self.logger.exception("Failed to fetch or decrypt messages from Supabase")
+    #         return []

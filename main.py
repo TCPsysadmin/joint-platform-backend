@@ -105,6 +105,7 @@ def decode_jwt(token: str) -> AuthenticatedUser:
             algorithms=["HS256"],
             issuer=JWT_ISSUER,
             options={"require": ["iss", "sub"], "verify_exp": True, "verify_signature": True},
+            leeway=60,  # Allow 60 seconds clock skew for iat/exp validation
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -213,6 +214,11 @@ class HistoryResponse(BaseModel):
     session_id: str
 
 
+class SessionsResponse(BaseModel):
+    sessions: list = Field(default_factory=list)
+    count: int
+
+
 class HealthResponse(BaseModel):
     status: str
     timestamp: str
@@ -281,7 +287,8 @@ async def create_session(user: AuthenticatedUser = Depends(require_auth)):
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
             raise HTTPException(status_code=503, detail="Service unavailable")
-        session_id = await rag_service.create_new_session()
+        contact_id = user.sub
+        session_id = await rag_service.create_new_session(contact_id)
         return SessionResponse(session_id=session_id, message="New chat session created")
     except HTTPException:
         raise
@@ -291,12 +298,22 @@ async def create_session(user: AuthenticatedUser = Depends(require_auth)):
 
 
 @app.get("/session/{session_id}/history", response_model=HistoryResponse)
-async def get_conversation_history(session_id: str, limit: int = 10, user: AuthenticatedUser = Depends(require_auth)):
+async def get_conversation_history(
+    session_id: str, 
+    max_tokens: Optional[int] = None,
+    user: AuthenticatedUser = Depends(require_auth)
+):
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
             raise HTTPException(status_code=503, detail="Service unavailable")
-        messages = await rag_service.get_conversation_history(session_id, limit)
+        contact_id = user.sub
+        messages = await rag_service.get_conversation_history(
+            session_id, 
+            contact_id,
+            max_tokens=max_tokens,
+            include_summary=True
+        )
         return HistoryResponse(messages=messages, session_id=session_id)
     except HTTPException:
         raise
@@ -311,7 +328,8 @@ async def clear_session(session_id: str, user: AuthenticatedUser = Depends(requi
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
             raise HTTPException(status_code=503, detail="Service unavailable")
-        success = await rag_service.clear_session(session_id)
+        contact_id = user.sub
+        success = await rag_service.clear_session(session_id, contact_id)
         if success:
             return {"message": f"Session {session_id} cleared successfully"}
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -319,6 +337,57 @@ async def clear_session(session_id: str, user: AuthenticatedUser = Depends(requi
         raise
     except Exception:
         logger.exception("clear_session endpoint failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/sessions", response_model=SessionsResponse)
+async def get_recent_sessions(limit: int = 10, user: AuthenticatedUser = Depends(require_auth)):
+    """
+    Get the N most recent chat sessions for the authenticated user.
+    Sessions are ordered by last_message_at DESC.
+    """
+    try:
+        rag_service: RAGService = app.state.rag_service
+        if not rag_service:
+            raise HTTPException(status_code=503, detail="Service unavailable")
+        contact_id = user.sub
+        sessions = await rag_service.get_recent_sessions(contact_id, limit=limit)
+        return SessionsResponse(sessions=sessions, count=len(sessions))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("get_recent_sessions endpoint failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/session/{session_id}/summary")
+async def get_session_summary(session_id: str, user: AuthenticatedUser = Depends(require_auth)):
+    """
+    Get the summary for a specific session (for testing/debugging).
+    """
+    try:
+        rag_service: RAGService = app.state.rag_service
+        if not rag_service:
+            raise HTTPException(status_code=503, detail="Service unavailable")
+        contact_id = user.sub
+        
+        # Get session metadata including summary
+        metadata = await rag_service.memory_service.get_session_metadata(session_id, contact_id)
+        
+        if not metadata:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return {
+            "session_id": session_id,
+            "summary": metadata.get("summary"),
+            "summary_updated_at": metadata.get("summary_updated_at"),
+            "summary_last_message_id": metadata.get("summary_last_message_id"),
+            "has_summary": bool(metadata.get("summary"))
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("get_session_summary endpoint failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -480,8 +549,10 @@ async def chat_stream(
                 #     stream_gen = rag_service.get_gpt_response_stream
                 stream_gen = rag_service.get_grok_response_stream
 
+                contact_id = user.sub
                 async for chunk in stream_gen(
                     user_message=request_data.message,
+                    contact_id=contact_id,
                     session_id=request_data.session_id,
                     max_tokens=request_data.max_tokens,
                     model="grok-4-fast-reasoning",

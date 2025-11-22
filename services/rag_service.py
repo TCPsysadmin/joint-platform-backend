@@ -4,8 +4,6 @@ import asyncio
 import time
 import logging
 import re
-import uuid
-import json
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 import httpx
@@ -159,16 +157,24 @@ class RAGService:
         self.logger.error("Vector search failed after retries")
         return []
 
-    async def get_rag_response(self, user_message: str, session_id: Optional[str] = None, max_tokens: int = 500, model: Optional[str] = None) -> Dict[str, Any]:
+    async def get_rag_response(
+        self, 
+        user_message: str, 
+        contact_id: str,
+        session_id: Optional[str] = None, 
+        max_tokens: int = 500, 
+        model: Optional[str] = None,
+        history_token_limit: Optional[int] = 800
+    ) -> Dict[str, Any]:
         """Generate a RAG-based AI response."""
         t0 = time.monotonic()
         try:
             # Ensure we have a session
             if not session_id:
-                session_id = str(uuid.uuid4())
+                session_id = await self.memory_service.create_session(contact_id)
 
             # Store user message first so history includes it
-            await self.memory_service.add_user_message(session_id, user_message)
+            await self.memory_service.add_user_message(session_id, contact_id, user_message)
 
             # Prepare retrieval
             expanded_message = expand_acronyms(user_message)
@@ -179,8 +185,16 @@ class RAGService:
             t_embed = time.monotonic() - t_embed_start
 
             # Fetch history and docs concurrently (after embedding)
+            # Use token-based trimming instead of message count
             t_io_start = time.monotonic()
-            history_task = asyncio.create_task(self.memory_service.get_conversation_history(session_id, limit=MAX_MESSAGES))
+            history_task = asyncio.create_task(
+                self.memory_service.get_conversation_history(
+                    session_id, 
+                    contact_id, 
+                    max_tokens=history_token_limit,
+                    include_summary=True
+                )
+            )
             docs_task = asyncio.create_task(self.search_similar_documents(query_embedding, limit=TOP_K))
             conversation_history, similar_docs = await asyncio.gather(history_task, docs_task)
             t_io = time.monotonic() - t_io_start
@@ -247,7 +261,12 @@ class RAGService:
                 assistant_response = ""
 
             # Save assistant reply
-            await self.memory_service.add_ai_message(session_id, assistant_response)
+            await self.memory_service.add_ai_message(session_id, contact_id, assistant_response)
+            
+            # Check and update summary if needed (async, non-blocking)
+            asyncio.create_task(
+                self.check_and_update_summary(session_id, contact_id)
+            )
 
             # Log timings
             t_total = time.monotonic() - t0
@@ -267,19 +286,231 @@ class RAGService:
             self.logger.exception("Error generating RAG response")
             raise RuntimeError("RAG response generation failed")
 
-    async def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        return await self.memory_service.get_conversation_history(session_id, limit)
+    async def get_conversation_history(
+        self, 
+        session_id: str, 
+        contact_id: str,
+        max_tokens: Optional[int] = None,
+        include_summary: bool = True
+    ) -> List[Dict[str, Any]]:
+        return await self.memory_service.get_conversation_history(
+            session_id, 
+            contact_id, 
+            max_tokens=max_tokens,
+            include_summary=include_summary
+        )
 
-    async def create_new_session(self) -> str:
-        return str(uuid.uuid4())
+    async def get_recent_sessions(self, contact_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get the N most recent sessions for a user."""
+        return await self.memory_service.get_recent_sessions(contact_id, limit)
 
-    async def clear_session(self, session_id: str) -> bool:
+    async def create_new_session(self, contact_id: str) -> str:
+        """Create a new session for a user and return the session_id."""
+        return await self.memory_service.create_session(contact_id)
+
+    async def clear_session(self, session_id: str, contact_id: str) -> bool:
         try:
-            await self.memory_service.clear_memory(session_id)
+            await self.memory_service.clear_memory(session_id, contact_id)
             return True
         except Exception:
             self.logger.exception("Error clearing session")
             return False
+
+    async def generate_session_summary(
+        self,
+        session_id: str,
+        contact_id: str,
+        existing_summary: Optional[str],
+        new_messages: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        """
+        Generate a summary of the conversation using the LLM.
+        
+        Args:
+            session_id: Session ID
+            contact_id: User's contact ID
+            existing_summary: Previous summary if it exists
+            new_messages: New messages to summarize (newest first)
+        
+        Returns:
+            Generated summary string, or None if generation failed
+        """
+        try:
+            # Format messages for summarization (reverse to chronological order)
+            messages_for_summary = []
+            for msg in reversed(new_messages):
+                role = "user" if msg.get("role") == "human" else "assistant"
+                content = msg.get("content", "")
+                messages_for_summary.append(f"{role.capitalize()}: {content}")
+            
+            conversation_text = "\n\n".join(messages_for_summary)
+            
+            # Build summary prompt
+            if existing_summary:
+                summary_prompt = f"""You are summarizing a conversation. There is already a summary of earlier messages:
+
+Previous Summary:
+{existing_summary}
+
+New Messages Since Last Summary:
+{conversation_text}
+
+Please create a concise, comprehensive summary that:
+1. Incorporates the previous summary
+2. Adds key information from the new messages
+3. Maintains important context and decisions
+4. Is no more than 3-4 sentences
+
+Summary:"""
+            else:
+                summary_prompt = f"""You are summarizing a conversation. Please create a concise summary that captures:
+1. The main topics discussed
+2. Key decisions or conclusions
+3. Important context for future conversations
+4. Is no more than 3-4 sentences
+
+Conversation:
+{conversation_text}
+
+Summary:"""
+
+            # Generate summary using OpenAI (use a cheaper/faster model for summaries)
+            response = await self._retry_async_call(
+                lambda: self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",  # Use cheaper model for summaries
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that creates concise conversation summaries."},
+                        {"role": "user", "content": summary_prompt}
+                    ],
+                    max_tokens=200,  # Keep summaries short
+                    temperature=0.3  # Lower temperature for more consistent summaries
+                ),
+                attempts=2,
+                base_delay=1.0,
+            )
+
+            summary = response.choices[0].message.content.strip()
+            self.logger.info("Generated summary for session %s: %s", session_id, summary[:100])
+            return summary
+
+        except Exception as e:
+            self.logger.exception("Failed to generate session summary for session %s", session_id)
+            return None
+
+    async def generate_session_title(self, summary: str) -> Optional[str]:
+        """
+        Generate a concise title (max 60 characters) from the session summary.
+        
+        Args:
+            summary: The session summary text
+        
+        Returns:
+            A short title string, or None if generation failed
+        """
+        try:
+            # Use LLM to generate a concise title from the summary
+            title_prompt = f"""Based on this conversation summary, generate a short, descriptive title (maximum 60 characters, no quotes):
+
+Summary:
+{summary}
+
+Title:"""
+
+            response = await self._retry_async_call(
+                lambda: self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that creates concise, descriptive titles for conversations."},
+                        {"role": "user", "content": title_prompt}
+                    ],
+                    max_tokens=20,  # Titles should be short
+                    temperature=0.5
+                ),
+                attempts=2,
+                base_delay=1.0,
+            )
+
+            title = response.choices[0].message.content.strip()
+            # Remove quotes if present
+            title = title.strip('"\'')
+            # Truncate to 60 characters if needed
+            if len(title) > 60:
+                title = title[:57] + "..."
+            
+            self.logger.info("Generated title: %s", title)
+            return title
+
+        except Exception as e:
+            self.logger.exception("Failed to generate session title")
+            # Fallback: use first sentence of summary, truncated
+            if summary:
+                first_sentence = summary.split('.')[0].strip()
+                if len(first_sentence) > 60:
+                    return first_sentence[:57] + "..."
+                return first_sentence
+            return None
+
+    async def check_and_update_summary(
+        self,
+        session_id: str,
+        contact_id: str,
+        message_count_threshold: int = 12,
+        token_count_threshold: int = 1500
+    ) -> None:
+        """
+        Check if summary should be updated and generate/update it if needed.
+        This should be called after adding messages to a session.
+        """
+        try:
+            should_update, metadata, new_messages = await self.memory_service.should_update_summary(
+                session_id,
+                contact_id,
+                message_count_threshold=message_count_threshold,
+                token_count_threshold=token_count_threshold
+            )
+
+            if not should_update or not new_messages:
+                return
+
+            # Get existing summary
+            existing_summary = metadata.get("summary") if metadata else None
+
+            # Generate new summary
+            summary = await self.generate_session_summary(
+                session_id,
+                contact_id,
+                existing_summary,
+                new_messages
+            )
+
+            if summary:
+                # Find the most recent message ID (newest message has highest ID)
+                # Messages are newest first, so first message has the highest ID
+                last_message_id = None
+                for msg in new_messages:
+                    msg_id = msg.get("id")
+                    if msg_id:
+                        if last_message_id is None or msg_id > last_message_id:
+                            last_message_id = msg_id
+
+                if last_message_id:
+                    # Generate a title from the summary
+                    title = await self.generate_session_title(summary)
+                    
+                    await self.memory_service.update_session_summary(
+                        session_id,
+                        contact_id,
+                        summary,
+                        last_message_id,
+                        title=title
+                    )
+                    self.logger.info("Updated summary for session %s (last_message_id: %s)", session_id, last_message_id)
+                else:
+                    self.logger.warning("Could not determine last_message_id for session %s, skipping summary update", session_id)
+
+        except Exception as e:
+            # Don't fail the main request if summary generation fails
+            self.logger.exception("Error in check_and_update_summary for session %s", session_id)
 
     async def health_check_openai(self) -> Dict[str, Any]:
         """Check OpenAI API connectivity and response time."""
@@ -366,9 +597,11 @@ class RAGService:
     async def get_gpt_response_stream(
             self,
             user_message: str,
+            contact_id: str,
             session_id: Optional[str] = None,
             max_tokens: int = 700,
-            model: Optional[str] = None
+            model: Optional[str] = None,
+            history_token_limit: Optional[int] = 800
         ) -> AsyncGenerator[Dict[str, Any], None]:
             """Generate a streaming RAG-based AI response using Server-Sent Events."""
             t0 = time.monotonic()
@@ -376,7 +609,7 @@ class RAGService:
             try:
                 # Ensure we have a session
                 if not session_id:
-                    session_id = str(uuid.uuid4())
+                    session_id = await self.memory_service.create_session(contact_id)
 
                 yield {
                     "type": "session",
@@ -384,7 +617,7 @@ class RAGService:
                     "timestamp": time.time()
                 }
 
-                await self.memory_service.add_user_message(session_id, user_message)
+                await self.memory_service.add_user_message(session_id, contact_id, user_message)
 
                 yield {
                     "type": "status",
@@ -406,9 +639,15 @@ class RAGService:
                 }
 
                 # Retrieve history and docs concurrently
+                # Use token-based trimming instead of message count
                 t_io_start = time.monotonic()
                 history_task = asyncio.create_task(
-                    self.memory_service.get_conversation_history(session_id, limit=MAX_MESSAGES)
+                    self.memory_service.get_conversation_history(
+                        session_id, 
+                        contact_id,
+                        max_tokens=history_token_limit,
+                        include_summary=True
+                    )
                 )
                 docs_task = asyncio.create_task(
                     self.search_similar_documents(query_embedding, limit=TOP_K)
@@ -498,7 +737,12 @@ class RAGService:
 
                 # Save the full AI response
                 if full_response:
-                    await self.memory_service.add_ai_message(session_id, full_response)
+                    await self.memory_service.add_ai_message(session_id, contact_id, full_response)
+                    
+                    # Check and update summary if needed (async, non-blocking)
+                    asyncio.create_task(
+                        self.check_and_update_summary(session_id, contact_id)
+                    )
 
                 t_total = time.monotonic() - t0
                 self.logger.info(
@@ -525,9 +769,11 @@ class RAGService:
     async def get_grok_response_stream(
                 self,
                 user_message: str,
+                contact_id: str,
                 session_id: Optional[str] = None,
                 max_tokens: int = 1500,
-                model: Optional[str] = None
+                model: Optional[str] = None,
+                history_token_limit: Optional[int] = 800
             ) -> AsyncGenerator[Dict[str, Any], None]:
                 """Generate a streaming RAG-based AI response using Server-Sent Events."""
                 t0 = time.monotonic()
@@ -535,7 +781,7 @@ class RAGService:
                 try:
                     # Ensure we have a session
                     if not session_id:
-                        session_id = str(uuid.uuid4())
+                        session_id = await self.memory_service.create_session(contact_id)
 
                     yield {
                         "type": "session",
@@ -543,19 +789,27 @@ class RAGService:
                         "timestamp": time.time()
                     }
 
-                    await self.memory_service.add_user_message(session_id, user_message)
-
+                    # Start message storage and embedding generation in parallel
+                    expanded_message = expand_acronyms(user_message)
+                    
+                    # Store message and generate embedding concurrently
+                    store_message_task = asyncio.create_task(
+                        self.memory_service.add_user_message(session_id, contact_id, user_message)
+                    )
+                    embedding_task = asyncio.create_task(
+                        self.get_embedding(expanded_message)
+                    )
+                    
                     yield {
                         "type": "status",
                         "message": "Processing query...",
                         "timestamp": time.time()
                     }
-
-                    # Expand acronyms and get embedding
-                    expanded_message = expand_acronyms(user_message)
-
+                    
+                    # Wait for both to complete
                     t_embed_start = time.monotonic()
-                    query_embedding = await self.get_embedding(expanded_message)
+                    await store_message_task  # Ensure message is stored
+                    query_embedding = await embedding_task
                     t_embed = time.monotonic() - t_embed_start
 
                     yield {
@@ -565,9 +819,15 @@ class RAGService:
                     }
 
                     # Retrieve history and docs concurrently
+                    # Use token-based trimming instead of message count
                     t_io_start = time.monotonic()
                     history_task = asyncio.create_task(
-                        self.memory_service.get_conversation_history(session_id, limit=MAX_MESSAGES)
+                        self.memory_service.get_conversation_history(
+                            session_id, 
+                            contact_id,
+                            max_tokens=history_token_limit,
+                            include_summary=True
+                        )
                     )
                     docs_task = asyncio.create_task(
                         self.search_similar_documents(query_embedding, limit=TOP_K)
@@ -577,7 +837,8 @@ class RAGService:
 
                     # Prepare context & sources
                     sources = [{"id": d.get("id"), "metadata": d.get("metadata", {})} for d in similar_docs]
-                    context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
+                    context_budget = min(CONTEXT_CHAR_BUDGET, 30000)
+                    context = pack_context(similar_docs, char_budget=context_budget)
 
                     yield {
                         "type": "sources",
@@ -598,8 +859,7 @@ class RAGService:
                             messages.append(user(msg["content"]))
                     messages.append(user(user_message))
 
-                    # max_tokens = max(32, min(int(max_tokens), 1000))
-                    max_tokens = 1500
+                    max_tokens = 1200
                     selected_model = "grok-4-1-fast-reasoning"
 
                     t_llm_start = time.monotonic()
@@ -635,17 +895,26 @@ class RAGService:
                             "timestamp": time.time()
                         }
                         return
+                    finally:
+                        t_llm = time.monotonic() - t_llm_start
 
-                    # t_llm = time.monotonic() - t_llm_start
-                    # Save the full AI response
+                    # Save the full AI response (non-blocking - don't wait for it)
                     if full_response:
-                        await self.memory_service.add_ai_message(session_id, full_response)
+                        # Save message in background to not block response
+                        asyncio.create_task(
+                            self.memory_service.add_ai_message(session_id, contact_id, full_response)
+                        )
+                        
+                        # Check and update summary if needed (async, non-blocking)
+                        asyncio.create_task(
+                            self.check_and_update_summary(session_id, contact_id)
+                        )
 
-                    # t_total = time.monotonic() - t0
-                    # self.logger.info(
-                    #     "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
-                    #     session_id, t_embed, t_io, t_llm, t_total
-                    # )
+                    t_total = time.monotonic() - t0
+                    self.logger.info(
+                        "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
+                        session_id, t_embed, t_io, t_llm, t_total
+                    )
 
                     yield {
                         "type": "done",

@@ -1,4 +1,4 @@
-# Collection of prompts to test
+# Collection of prompts for the RAG chatbot
 
 
 
