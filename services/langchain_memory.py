@@ -561,11 +561,11 @@ class LangChainMemoryService:
     #     encrypted = self.encryptor.encrypt(message)
     #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_message"
     #     payload = {
-    #         "p_session_id": session_id,
-    #         "p_contact_id": contact_id,
-    #         "p_role": "human",
-    #         "p_ciphertext": encrypted["ciphertext"],
-    #         "p_nonce": encrypted["nonce"]
+    #         "session_id": session_id,
+    #         "contact_id": contact_id,
+    #         "role": "human",
+    #         "ciphertext": encrypted["ciphertext"],
+    #         "nonce": encrypted["nonce"]
     #     }
     #     try:
     #         await self._request_with_retries("post", rpc_url, json=payload)
@@ -580,11 +580,11 @@ class LangChainMemoryService:
     #     encrypted = self.encryptor.encrypt(message)
     #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/add_message"
     #     payload = {
-    #         "p_session_id": session_id,
-    #         "p_contact_id": contact_id,
-    #         "p_role": "ai",
-    #         "p_ciphertext": encrypted["ciphertext"],
-    #         "p_nonce": encrypted["nonce"]
+    #         "session_id": session_id,
+    #         "contact_id": contact_id,
+    #         "role": "ai",
+    #         "ciphertext": encrypted["ciphertext"],
+    #         "nonce": encrypted["nonce"]
     #     }
     #     try:
     #         await self._request_with_retries("post", rpc_url, json=payload)
@@ -604,9 +604,9 @@ class LangChainMemoryService:
     #     """
     #     rpc_url = f"{self.supabase_url}/rest/v1/rpc/get_recent_messages"
     #     payload = {
-    #         "p_session_id": session_id,
-    #         "p_contact_id": contact_id,
-    #         "p_limit": limit
+    #         "session_id": session_id,
+    #         "contact_id": contact_id,
+    #         "limit": limit
     #     }
     #     try:
     #         resp = await self._request_with_retries("post", rpc_url, json=payload)
