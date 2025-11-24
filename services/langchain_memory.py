@@ -679,15 +679,15 @@ class LangChainMemoryService:
         contact_id: str
     ) -> Optional[Dict[str, Any]]:
         """
-        Get session metadata including encrypted summary info.
-        Returns dict with: summary_ciphertext, summary_nonce, summary_updated_at, summary_last_message_id
-        Note: This returns raw encrypted data, not decrypted summary
+        Get session metadata including encrypted summary info and title.
+        Returns dict with: summary_ciphertext, summary_nonce, summary_updated_at, summary_last_message_id, title
+        Note: This returns raw encrypted data for summary, but title is plaintext
         """
         url = f"{self.supabase_url}/rest/v1/encrypted_sessions"
         params = {
             "id": f"eq.{session_id}",
             "contact_id": f"eq.{contact_id}",
-            "select": "ciphertext,nonce,summary_updated_at,summary_last_message_id"
+            "select": "ciphertext,nonce,summary_updated_at,summary_last_message_id,title"
         }
         try:
             resp = await self._request_with_retries("get", url, params=params)
@@ -776,6 +776,48 @@ class LangChainMemoryService:
                 self.logger.info("Updated encrypted session summary for session %s", session_id)
         except Exception:
             self.logger.exception("Failed to update encrypted session summary in Supabase")
+            raise
+
+    async def update_session_title(
+        self,
+        session_id: str,
+        contact_id: str,
+        title: str
+    ) -> None:
+        """
+        Update just the session title in the database.
+        
+        Args:
+            session_id: Session ID
+            contact_id: User's contact ID  
+            title: The new title for the session (stored in plaintext)
+        """
+        url = f"{self.supabase_url}/rest/v1/encrypted_sessions"
+        params = {
+            "id": f"eq.{session_id}",
+            "contact_id": f"eq.{contact_id}"
+        }
+        payload = {
+            "title": title
+        }
+        
+        try:
+            # Using PATCH to update existing session
+            headers = dict(self.supabase_headers)
+            headers["Prefer"] = "return=minimal"  # Don't return the updated row
+            
+            resp = await self._client.patch(
+                url,
+                headers=headers,
+                params=params,
+                json=payload,
+                timeout=self.request_timeout
+            )
+            resp.raise_for_status()
+            
+            self.logger.info("Updated session title for session %s: %s", session_id, title)
+        except Exception:
+            self.logger.exception("Failed to update session title in Supabase")
             raise
 
     async def get_messages_since_summary(

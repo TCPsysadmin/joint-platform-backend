@@ -173,6 +173,9 @@ class RAGService:
             if not session_id:
                 session_id = await self.memory_service.create_session(contact_id)
 
+            # Check if this is the first message and set title if so
+            await self.handle_first_message_title(session_id, contact_id, user_message)
+            
             # Store user message first so history includes it
             await self.memory_service.add_user_message(session_id, contact_id, user_message)
 
@@ -453,6 +456,34 @@ Title:"""
                 return first_sentence
             return None
 
+    async def handle_first_message_title(self, session_id: str, contact_id: str, user_message: str) -> None:
+        """
+        Check if this is the first message in a session and set the title if so.
+        
+        Args:
+            session_id: Session ID
+            contact_id: User's contact ID
+            user_message: The user message that might be the first one
+        """
+        try:
+            # Check if this session has any existing messages
+            history = await self.memory_service.get_conversation_history(
+                session_id, 
+                contact_id, 
+                max_tokens=1,  # Just need to check if any messages exist
+                include_summary=False
+            )
+            
+            # If no history exists, this is the first message - generate and set title
+            if not history:
+                title = user_message if len(user_message) < 30 else user_message[:30]
+                await self.memory_service.update_session_title(session_id, contact_id, title)
+                self.logger.info("Set title for new session %s: %s", session_id, title)
+                
+        except Exception as e:
+            # Don't fail the main request if title generation fails
+            self.logger.exception("Error setting title for first message in session %s", session_id)
+
     async def check_and_update_summary(
         self,
         session_id: str,
@@ -620,6 +651,9 @@ Title:"""
                     "timestamp": time.time()
                 }
 
+                # Check if this is the first message and set title if so
+                await self.handle_first_message_title(session_id, contact_id, user_message)
+                
                 await self.memory_service.add_user_message(session_id, contact_id, user_message)
 
                 yield {
@@ -795,7 +829,10 @@ Title:"""
                     # Start message storage and embedding generation in parallel
                     expanded_message = expand_acronyms(user_message)
                     
-                    # Store message and generate embedding concurrently
+                    # Check if this is the first message and set title, then store message and generate embedding concurrently
+                    title_task = asyncio.create_task(
+                        self.handle_first_message_title(session_id, contact_id, user_message)
+                    )
                     store_message_task = asyncio.create_task(
                         self.memory_service.add_user_message(session_id, contact_id, user_message)
                     )
@@ -809,8 +846,9 @@ Title:"""
                         "timestamp": time.time()
                     }
                     
-                    # Wait for both to complete
+                    # Wait for all to complete
                     t_embed_start = time.monotonic()
+                    await title_task  # Ensure title is set if needed
                     await store_message_task  # Ensure message is stored
                     query_embedding = await embedding_task
                     t_embed = time.monotonic() - t_embed_start

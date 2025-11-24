@@ -230,30 +230,6 @@ class HealthResponse(BaseModel):
 async def root():
     return {"message": "RAG Training Chatbot API is running"}
 
-# depreciated
-@app.get("/models")
-async def get_available_models():
-    """Get list of available AI models for chat responses."""
-    return {
-        "models": [
-            {
-                "id": "gpt-4o-mini",
-                "name": "GPT-4o Mini",
-                "description": "Efficient GPT-4 variant for quick interactions"
-            },
-            {
-                "id": "grok-4-fast-reasoning",
-                "name": "Grok 4 Fast Reasoning",
-                "description": "Lightweight grok model optimized for speed and intelligence"
-            },
-            {
-                "id": "gpt-3-mini",
-                "name": "Grok 3 Mini",
-                "description": "Grok model with longer thinking process"
-            }
-        ],
-        "default": os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
-    }
 
 # depreciated
 @app.post("/chat", response_model=ChatResponse)
@@ -386,6 +362,7 @@ async def get_session_summary(session_id: str, user: AuthenticatedUser = Depends
             "summary": metadata.get("summary"),
             "summary_updated_at": metadata.get("summary_updated_at"),
             "summary_last_message_id": metadata.get("summary_last_message_id"),
+            "title": metadata.get("title"),
             "has_summary": bool(metadata.get("summary"))
         }
     except HTTPException:
