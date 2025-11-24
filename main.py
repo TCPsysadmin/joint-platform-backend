@@ -324,6 +324,10 @@ async def get_conversation_history(
 
 @app.delete("/session/{session_id}")
 async def clear_session(session_id: str, user: AuthenticatedUser = Depends(require_auth)):
+    """
+    Delete a session and all its messages.
+    This permanently removes the session from the database.
+    """
     try:
         rag_service: RAGService = app.state.rag_service
         if not rag_service:
@@ -331,7 +335,7 @@ async def clear_session(session_id: str, user: AuthenticatedUser = Depends(requi
         contact_id = user.sub
         success = await rag_service.clear_session(session_id, contact_id)
         if success:
-            return {"message": f"Session {session_id} cleared successfully"}
+            return {"message": f"Session {session_id} deleted successfully"}
         raise HTTPException(status_code=500, detail="Internal server error")
     except HTTPException:
         raise

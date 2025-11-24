@@ -309,11 +309,14 @@ class RAGService:
         return await self.memory_service.create_session(contact_id)
 
     async def clear_session(self, session_id: str, contact_id: str) -> bool:
+        """
+        Delete a session and all its messages.
+        This fully deletes the session from the database (not just clears messages).
+        """
         try:
-            await self.memory_service.clear_memory(session_id, contact_id)
-            return True
+            return await self.memory_service.delete_session(session_id, contact_id)
         except Exception:
-            self.logger.exception("Error clearing session")
+            self.logger.exception("Error deleting session")
             return False
 
     async def generate_session_summary(
