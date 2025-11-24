@@ -524,7 +524,7 @@ class LangChainMemoryService:
         """
         Clear all messages in a session.
         Note: This doesn't delete the session itself, just the messages.
-        For full session deletion, you'd need to delete from chat_sessions table.
+        For full session deletion, use delete_session() instead.
         """
         # Since we don't have a clear_session_messages function, we'll delete via direct table access
         url = f"{self.supabase_url}/rest/v1/chat_messages"
@@ -537,6 +537,25 @@ class LangChainMemoryService:
         except Exception:
             self.logger.exception("Failed to clear memory for session %s", session_id)
             raise
+
+    async def delete_session(self, session_id: str, contact_id: str) -> bool:
+        """
+        Delete a session and all its messages.
+        This calls a Supabase RPC function that deletes both messages and the session record.
+        Returns True if successful, False otherwise.
+        """
+        rpc_url = f"{self.supabase_url}/rest/v1/rpc/delete_session"
+        payload = {
+            "p_session_id": session_id,
+            "p_contact_id": contact_id
+        }
+        try:
+            await self._request_with_retries("post", rpc_url, json=payload)
+            self.logger.info("Deleted session %s for contact_id: %s", session_id, contact_id)
+            return True
+        except Exception:
+            self.logger.exception("Failed to delete session %s for contact_id: %s", session_id, contact_id)
+            return False
 
     # ============================================================================
     # ENCRYPTION VERSIONS (COMMENTED - READY FOR WHEN DB SCHEMA SUPPORTS IT)
