@@ -40,28 +40,21 @@ def expand_acronyms(q: str) -> str:
 
 
 def pack_context(docs: List[Dict[str, Any]], char_budget: int = CONTEXT_CHAR_BUDGET) -> str:
-    """
-    Concatenate doc contents up to a character budget (high-score docs first).
-    Prioritizes complete documents over partial ones - if a document doesn't fit fully, skip it.
-    """
+    """Concatenate doc contents up to a character budget (high-score docs first)."""
     parts, used = [], 0
     for d in docs:
         txt = (d.get("content") or "").strip()
         if not txt:
             continue
         remaining = char_budget - used
-        
-        # If we can't fit the full document, skip it (don't truncate mid-document)
+        if remaining <= 0:
+            break
         if len(txt) > remaining:
-            # Only include if it's the first document and we have some space
-            if used == 0 and remaining > 100:  # At least 100 chars for first doc
-                txt = txt[:remaining]
-                parts.append(txt)
-            break  # Don't include partial documents
-        
+            # Truncate if needed, but always include at least something from first doc
+            txt = txt[:remaining]
         parts.append(txt)
         used += len(txt)
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) if parts else ""  # Return empty string if no docs, not None
 
 
 class RAGService:
