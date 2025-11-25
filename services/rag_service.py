@@ -17,10 +17,10 @@ from .encryption import AESEncryptor
 # ---- Constants / Config ----
 MAX_MESSAGES = 20
 TOP_K = 3  # retrieval top-k (keep small for latency/cost)
-CONTEXT_CHAR_BUDGET = 36000  # ~character budget; consider switching to token-based trimming
+CONTEXT_CHAR_BUDGET = 15000  # Optimized for 3 documents - allows ~5000 chars per doc (~1250 tokens per doc)
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search")  # make configurable
+SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search_tuned")  # Use tuned version for faster searches
 MAX_GROK_REQUESTS = 40
 
 ACRONYM_MAP = {
@@ -40,17 +40,25 @@ def expand_acronyms(q: str) -> str:
 
 
 def pack_context(docs: List[Dict[str, Any]], char_budget: int = CONTEXT_CHAR_BUDGET) -> str:
-    """Concatenate doc contents up to a character budget (high-score docs first)."""
+    """
+    Concatenate doc contents up to a character budget (high-score docs first).
+    Prioritizes complete documents over partial ones - if a document doesn't fit fully, skip it.
+    """
     parts, used = [], 0
     for d in docs:
         txt = (d.get("content") or "").strip()
         if not txt:
             continue
         remaining = char_budget - used
-        if remaining <= 0:
-            break
+        
+        # If we can't fit the full document, skip it (don't truncate mid-document)
         if len(txt) > remaining:
-            txt = txt[:remaining]
+            # Only include if it's the first document and we have some space
+            if used == 0 and remaining > 100:  # At least 100 chars for first doc
+                txt = txt[:remaining]
+                parts.append(txt)
+            break  # Don't include partial documents
+        
         parts.append(txt)
         used += len(txt)
     return "\n\n".join(parts)
@@ -133,7 +141,8 @@ class RAGService:
         payload = {
             "query_embedding": query_embedding,
             "match_count": limit,
-            "filter": {}
+            "filter": {},
+            "ef_search": 40  # Lower ef_search for faster searches (40-100 range, lower = faster)
         }
 
         # simple retry loop for the HTTP RPC call (reduced retries for speed)
@@ -878,7 +887,7 @@ Title:"""
 
                     # Prepare context & sources
                     sources = [{"id": d.get("id"), "metadata": d.get("metadata", {})} for d in similar_docs]
-                    context_budget = min(CONTEXT_CHAR_BUDGET, 30000)
+                    context_budget = CONTEXT_CHAR_BUDGET  # Already optimized, no need for min cap
                     context = pack_context(similar_docs, char_budget=context_budget)
 
                     yield {
@@ -914,8 +923,8 @@ Title:"""
                                     max_tokens=max_tokens,
                                     messages=messages,
                                 ),
-                                attempts=3,
-                                base_delay=1.0,
+                                attempts=2,  # Reduced retries for faster failure
+                                base_delay=0.5,  # Reduced delay for faster retries
                             )
 
                         async for response, chunk in chat.stream():
