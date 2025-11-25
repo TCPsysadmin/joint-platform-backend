@@ -782,6 +782,31 @@ class LangChainMemoryService:
         except Exception:
             self.logger.exception("Failed to update encrypted session summary in Supabase")
             raise
+    
+    async def get_title(self, 
+        session_id: str, 
+        contact_id: str) -> str:
+        """
+        Retrieve the session title.
+        If the session has no title, generate one from the earliest decrypted user message.
+        Titles are stored in plaintext in encrypted_sessions.title.
+        """
+
+        url = f"{self.supabase_url}/rest/v1/encrypted_sessions"
+        params = {
+            "id": f"eq.{session_id}",
+            "contact_id": f"eq.{contact_id}",
+            "select": "title",
+        }
+        try:
+            resp = await self._request_with_retries("get", url, params=params)
+            data = resp.json()
+
+            if data and data[0].get("title"):
+                return data[0]["title"]
+        except Exception:
+            self.logger.exception("Failed to fetch title from session metadata")
+            return None
 
     async def update_session_title(
         self,
