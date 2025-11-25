@@ -119,8 +119,8 @@ class RAGService:
         try:
             resp = await self._retry_async_call(
                 lambda: self.openai_client.embeddings.create(model="text-embedding-3-small", input=text),
-                attempts=3,
-                base_delay=1.0,
+                attempts=2,  # Reduced retries for faster failure
+                base_delay=0.5,  # Reduced delay for faster retries
             )
             return resp.data[0].embedding
         except Exception:
@@ -136,10 +136,10 @@ class RAGService:
             "filter": {}
         }
 
-        # simple retry loop for the HTTP RPC call
-        for attempt in range(3):
+        # simple retry loop for the HTTP RPC call (reduced retries for speed)
+        for attempt in range(2):  # Reduced from 3 to 2 for faster failure
             try:
-                response = await self.client.post(rpc_url, headers=self.supabase_headers, json=payload, timeout=10.0)
+                response = await self.client.post(rpc_url, headers=self.supabase_headers, json=payload, timeout=5.0)
                 response.raise_for_status()
                 data = response.json()
                 return data if data else []
@@ -151,8 +151,8 @@ class RAGService:
                     raise
             except httpx.RequestError as e:
                 self.logger.exception("Vector search request error (attempt %s): %s", attempt + 1, e)
-            if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
+            if attempt < 1:  # Only retry once, with shorter delay
+                await asyncio.sleep(0.5)  # Reduced delay from exponential backoff
 
         self.logger.error("Vector search failed after retries")
         return []
@@ -164,7 +164,7 @@ class RAGService:
         session_id: Optional[str] = None, 
         max_tokens: int = 500, 
         model: Optional[str] = None,
-        history_token_limit: Optional[int] = 800
+        history_token_limit: Optional[int] = 1000
     ) -> Dict[str, Any]:
         """Generate a RAG-based AI response."""
         t0 = time.monotonic()
@@ -313,8 +313,8 @@ class RAGService:
 
     async def clear_session(self, session_id: str, contact_id: str) -> bool:
         """
-        Delete a session and all its messages.
-        This fully deletes the session from the database (not just clears messages).
+        Delete a session (messages are left orphaned).
+        This fully deletes the session from the database.
         """
         try:
             return await self.memory_service.delete_session(session_id, contact_id)
@@ -635,7 +635,7 @@ Title:"""
             session_id: Optional[str] = None,
             max_tokens: int = 700,
             model: Optional[str] = None,
-            history_token_limit: Optional[int] = 800
+            history_token_limit: Optional[int] = 1000
         ) -> AsyncGenerator[Dict[str, Any], None]:
             """Generate a streaming RAG-based AI response using Server-Sent Events."""
             t0 = time.monotonic()
@@ -810,7 +810,7 @@ Title:"""
                 session_id: Optional[str] = None,
                 max_tokens: int = 1500,
                 model: Optional[str] = None,
-                history_token_limit: Optional[int] = 800
+                history_token_limit: Optional[int] = 1000
             ) -> AsyncGenerator[Dict[str, Any], None]:
                 """Generate a streaming RAG-based AI response using Server-Sent Events."""
                 t0 = time.monotonic()

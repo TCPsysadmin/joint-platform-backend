@@ -23,7 +23,7 @@ class LangChainMemoryService:
         client: httpx.AsyncClient,
         encryptor: AESEncryptor, 
         logger: Optional[logging.Logger] = None,
-        request_timeout: float = 10.0,
+        request_timeout: float = 5.0,  # Reduced timeout for faster failures
         retry_attempts: int = 3,
     ):
         if not supabase_url or not supabase_key:
@@ -54,10 +54,9 @@ class LangChainMemoryService:
         return datetime.now(timezone.utc).isoformat()
 
     def _count_tokens(self, text: str) -> int:
-        """Count tokens in text. Falls back to character/4 estimation if tiktoken unavailable."""
-        if self.token_encoder:
-            return len(self.token_encoder.encode(text))
-        # Fallback: rough estimation (1 token ≈ 4 characters)
+        """Count tokens in text. Uses fast estimation for better performance."""
+        # Use fast character-based estimation (much faster than tiktoken)
+        # 1 token ≈ 4 characters is a good approximation for English text
         return len(text) // 4
 
     async def _request_with_retries(
@@ -147,38 +146,19 @@ class LangChainMemoryService:
     async def create_session(self, contact_id: str) -> str:
         """
         Create a new chat session for a user and return the session_id (UUID as string).
-        After creating, evicts old sessions to keep only 10 most recent.
+        The Supabase function automatically handles the 10-session limit by deleting the oldest session if needed.
         """
-        # rpc_url = f"{self.supabase_url}/rest/v1/rpc/create_session"
         rpc_url = f"{self.supabase_url}/rest/v1/rpc/create_encrypted_session"
         payload = {"p_contact_id": contact_id}
         try:
             resp = await self._request_with_retries("post", rpc_url, json=payload)
             session_id = resp.json()
             session_id = str(session_id) if session_id else str(uuid.uuid4())
-            
-            # Evict old sessions to keep only 10 most recent (runs in background)
-            asyncio.create_task(self.evict_old_sessions(contact_id))
-            
             return session_id
         except Exception:
             self.logger.exception("Failed to create session in Supabase")
             raise
 
-    async def evict_old_sessions(self, contact_id: str) -> None:
-        """
-        Evict old sessions, keeping only the 10 most recent for a user.
-        This is called automatically after creating new sessions.
-        """
-        # rpc_url = f"{self.supabase_url}/rest/v1/rpc/evict_old_sessions"
-        rpc_url = f"{self.supabase_url}/rest/v1/rpc/evict_old_encrypted_sessions"
-        payload = {"p_contact_id": contact_id}
-        try:
-            await self._request_with_retries("post", rpc_url, json=payload)
-            self.logger.debug("Evicted old sessions for contact_id: %s", contact_id)
-        except Exception:
-            # Don't fail if eviction fails - log and continue
-            self.logger.warning("Failed to evict old sessions for contact_id: %s", contact_id, exc_info=True)
 
     async def get_recent_sessions(self, contact_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -557,8 +537,8 @@ class LangChainMemoryService:
 
     async def delete_session(self, session_id: str, contact_id: str) -> bool:
         """
-        Delete a session and all its messages.
-        This calls a Supabase RPC function that deletes both messages and the session record.
+        Delete a session (messages are left orphaned).
+        This calls a Supabase RPC function that deletes the session record.
         Returns True if successful, False otherwise.
         """
         # rpc_url = f"{self.supabase_url}/rest/v1/rpc/delete_session"
@@ -633,7 +613,7 @@ class LangChainMemoryService:
         self, 
         session_id: str, 
         contact_id: str, 
-        limit: int = 100
+        limit: int = 14
     ) -> List[Dict[str, Any]]:
         """
         Get recent messages and decrypt them.
@@ -651,22 +631,32 @@ class LangChainMemoryService:
             if not data:
                 return []
             
-            # Decrypt each message
-            decrypted_messages = []
-            for msg in data:
+            # Decrypt all messages in parallel using thread pool (decryption is CPU-bound)
+            def decrypt_message(msg):
                 try:
                     plaintext = self.encryptor.decrypt(
                         msg["ciphertext"],
                         msg["nonce"]
                     )
-                    decrypted_messages.append({
+                    return {
                         "role": msg["role"],
                         "content": plaintext,
                         "created_at": msg["created_at"]
-                    })
+                    }
                 except Exception as e:
                     self.logger.warning("Failed to decrypt message: %s", e)
-                    continue
+                    return None
+            
+            # Decrypt all messages concurrently in thread pool
+            loop = asyncio.get_event_loop()
+            decryption_tasks = [
+                loop.run_in_executor(None, decrypt_message, msg) 
+                for msg in data
+            ]
+            decrypted_results = await asyncio.gather(*decryption_tasks)
+            
+            # Filter out None results (failed decryptions)
+            decrypted_messages = [msg for msg in decrypted_results if msg is not None]
             
             return decrypted_messages
         except Exception:
@@ -908,7 +898,8 @@ class LangChainMemoryService:
             If include_summary=True and summary exists, includes it as first message with role="system".
         """
         # Fetch session summary and messages in parallel for better performance
-        fetch_limit = 100 if max_tokens and max_tokens <= 1000 else 200
+        # Fetch only 10 most recent messages for faster decryption
+        fetch_limit = 14
         
         if include_summary:
             summary_task = asyncio.create_task(

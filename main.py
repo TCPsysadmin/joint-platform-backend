@@ -301,7 +301,7 @@ async def get_conversation_history(
 @app.delete("/session/{session_id}")
 async def clear_session(session_id: str, user: AuthenticatedUser = Depends(require_auth)):
     """
-    Delete a session and all its messages.
+    Delete a session (messages are left orphaned).
     This permanently removes the session from the database.
     """
     try:
