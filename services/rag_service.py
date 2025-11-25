@@ -314,8 +314,8 @@ class RAGService:
 
     async def clear_session(self, session_id: str, contact_id: str) -> bool:
         """
-        Delete a session (messages are left orphaned).
-        This fully deletes the session from the database.
+        Archive a session (sets is_archived = true).
+        Messages remain linked but session won't appear in active sessions.
         """
         try:
             return await self.memory_service.delete_session(session_id, contact_id)

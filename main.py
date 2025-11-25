@@ -301,8 +301,8 @@ async def get_conversation_history(
 @app.delete("/session/{session_id}")
 async def clear_session(session_id: str, user: AuthenticatedUser = Depends(require_auth)):
     """
-    Delete a session (messages are left orphaned).
-    This permanently removes the session from the database.
+    Archive a session (sets is_archived = true).
+    Messages remain linked but session won't appear in active sessions.
     """
     try:
         rag_service: RAGService = app.state.rag_service

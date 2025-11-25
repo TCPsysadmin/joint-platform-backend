@@ -169,6 +169,7 @@ class LangChainMemoryService:
         url = f"{self.supabase_url}/rest/v1/encrypted_sessions"
         params = {
             "contact_id": f"eq.{contact_id}",
+            "is_archived": "eq.false",  # Only get active (non-archived) sessions
             "order": "last_message_at.desc",
             "limit": str(limit),
             "select": (
@@ -537,8 +538,9 @@ class LangChainMemoryService:
 
     async def delete_session(self, session_id: str, contact_id: str) -> bool:
         """
-        Delete a session (messages are left orphaned).
-        This calls a Supabase RPC function that deletes the session record.
+        Archive a session (sets is_archived = true).
+        Messages remain linked but session won't appear in active sessions.
+        This calls a Supabase RPC function that archives the session.
         Returns True if successful, False otherwise.
         """
         rpc_url = f"{self.supabase_url}/rest/v1/rpc/delete_encrypted_session"
@@ -688,6 +690,7 @@ class LangChainMemoryService:
         params = {
             "id": f"eq.{session_id}",
             "contact_id": f"eq.{contact_id}",
+            "is_archived": "eq.false",  # Only get metadata from active sessions
             "select": "ciphertext,nonce,summary_updated_at,summary_last_message_id,title"
         }
         try:
@@ -745,7 +748,8 @@ class LangChainMemoryService:
         url = f"{self.supabase_url}/rest/v1/encrypted_sessions"
         params = {
             "id": f"eq.{session_id}",
-            "contact_id": f"eq.{contact_id}"
+            "contact_id": f"eq.{contact_id}",
+            "is_archived": "eq.false"  # Only update summary for active sessions
         }
         payload = {
             "ciphertext": encrypted_summary["ciphertext"],
@@ -796,7 +800,8 @@ class LangChainMemoryService:
         url = f"{self.supabase_url}/rest/v1/encrypted_sessions"
         params = {
             "id": f"eq.{session_id}",
-            "contact_id": f"eq.{contact_id}"
+            "contact_id": f"eq.{contact_id}",
+            "is_archived": "eq.false"  # Only update title for active sessions
         }
         payload = {
             "title": title
