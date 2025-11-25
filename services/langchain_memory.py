@@ -153,8 +153,8 @@ class LangChainMemoryService:
         try:
             resp = await self._request_with_retries("post", rpc_url, json=payload)
             session_id = resp.json()
-            session_id = str(session_id) if session_id else str(uuid.uuid4())
-            return session_id
+            # Supabase returns UUID as string, ensure it's a string
+            return str(session_id) if session_id else str(uuid.uuid4())
         except Exception:
             self.logger.exception("Failed to create session in Supabase")
             raise
@@ -541,7 +541,6 @@ class LangChainMemoryService:
         This calls a Supabase RPC function that deletes the session record.
         Returns True if successful, False otherwise.
         """
-        # rpc_url = f"{self.supabase_url}/rest/v1/rpc/delete_session"
         rpc_url = f"{self.supabase_url}/rest/v1/rpc/delete_encrypted_session"
         payload = {
             "p_session_id": session_id,
@@ -551,6 +550,18 @@ class LangChainMemoryService:
             await self._request_with_retries("post", rpc_url, json=payload)
             self.logger.info("Deleted session %s for contact_id: %s", session_id, contact_id)
             return True
+        except httpx.HTTPStatusError as e:
+            # Log the actual error from Supabase for debugging
+            error_detail = ""
+            try:
+                if e.response:
+                    error_detail = e.response.text
+                    self.logger.error("Supabase error deleting session %s: %s (status: %s)", 
+                                    session_id, error_detail, e.response.status_code)
+            except Exception:
+                pass
+            self.logger.exception("Failed to delete session %s for contact_id: %s", session_id, contact_id)
+            return False
         except Exception:
             self.logger.exception("Failed to delete session %s for contact_id: %s", session_id, contact_id)
             return False
