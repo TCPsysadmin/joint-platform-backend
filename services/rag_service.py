@@ -20,7 +20,7 @@ TOP_K = 3  # retrieval top-k (keep small for latency/cost)
 CONTEXT_CHAR_BUDGET = 15000  # Optimized for 3 documents - allows ~5000 chars per doc (~1250 tokens per doc)
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search_tuned")  # Use tuned version for faster searches
+SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search")  # make configurable
 MAX_GROK_REQUESTS = 40
 
 ACRONYM_MAP = {
@@ -134,14 +134,13 @@ class RAGService:
         payload = {
             "query_embedding": query_embedding,
             "match_count": limit,
-            "filter": {},
-            "ef_search": 40  # Lower ef_search for faster searches (40-100 range, lower = faster)
+            "filter": {}
         }
 
-        # simple retry loop for the HTTP RPC call (reduced retries for speed)
-        for attempt in range(2):  # Reduced from 3 to 2 for faster failure
+        # simple retry loop for the HTTP RPC call
+        for attempt in range(3):
             try:
-                response = await self.client.post(rpc_url, headers=self.supabase_headers, json=payload, timeout=5.0)
+                response = await self.client.post(rpc_url, headers=self.supabase_headers, json=payload, timeout=10.0)
                 response.raise_for_status()
                 data = response.json()
                 return data if data else []
@@ -153,8 +152,8 @@ class RAGService:
                     raise
             except httpx.RequestError as e:
                 self.logger.exception("Vector search request error (attempt %s): %s", attempt + 1, e)
-            if attempt < 1:  # Only retry once, with shorter delay
-                await asyncio.sleep(0.5)  # Reduced delay from exponential backoff
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
 
         self.logger.error("Vector search failed after retries")
         return []
