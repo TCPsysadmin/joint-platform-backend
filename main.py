@@ -231,32 +231,6 @@ async def root():
     return {"message": "RAG Training Chatbot API is running"}
 
 
-# depreciated
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, user: AuthenticatedUser = Depends(require_auth)):
-    try:
-        rag_service: RAGService = app.state.rag_service
-        if not rag_service:
-            raise HTTPException(status_code=503, detail="Service unavailable")
-        response = await rag_service.get_grok_response_stream_rag_response(
-            user_message=request.message,
-            session_id=request.session_id,
-            max_tokens=request.max_tokens,
-            model=request.model,
-        )
-        return ChatResponse(
-            response=response["answer"],
-            sources=response.get("sources", []),
-            session_id=response["session_id"],
-            model=response["model"],
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("chat endpoint failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
 @app.post("/session/new", response_model=SessionResponse)
 async def create_session(user: AuthenticatedUser = Depends(require_auth)):
     try:
@@ -495,39 +469,9 @@ async def chat_stream(
         # Register connection
         connection_manager.add_connection(connection_id, client_ip)
 
-        # 🔹 Validation: tier vs model restriction
-        # if user.tier == "basic" and request_data.model != "gpt-4o-mini":
-        #     async def validation_error_stream():
-        #         error_event = {
-        #             "type": "validation",
-        #             "error": "This model is not available on your current tier.",
-        #             "timestamp": time.time()
-        #         }
-        #         # SSE requires "data: "
-        #         yield f"data: {json.dumps(error_event)}\n\n"
-        #         yield "data: [DONE]\n\n"
-
-        #         # Cleanup connection
-        #         connection_manager.remove_connection(connection_id)
-
-            # return StreamingResponse(
-            #     # validation_error_stream(),
-            #     media_type="text/plain",
-            #     headers={
-            #         "Cache-Control": "no-cache",
-            #         "Connection": "keep-alive",
-            #         "Content-Type": "text/plain; charset=utf-8",
-            #         "X-Accel-Buffering": "no",
-            #         "X-Connection-ID": connection_id,
-            #         "X-User-Tier": user.tier or "",
-            #     }
-            # )
-
         # Normal SSE generation
         async def generate_sse():
             try:
-                # if request_data.model == "gpt-4o-mini":
-                #     stream_gen = rag_service.get_gpt_response_stream
                 stream_gen = rag_service.get_grok_response_stream
 
                 contact_id = user.sub

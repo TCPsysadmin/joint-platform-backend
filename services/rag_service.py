@@ -15,13 +15,12 @@ from .prompts import *
 from .encryption import AESEncryptor
 
 # ---- Constants / Config ----
-MAX_MESSAGES = 20
 TOP_K = 3  # retrieval top-k (keep small for latency/cost)
 CONTEXT_CHAR_BUDGET = 15000  # Optimized for 3 documents - allows ~5000 chars per doc (~1250 tokens per doc)
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search")  # make configurable
-MAX_GROK_REQUESTS = 40
+SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search_ids")  # use id-only search RPC
+SUPABASE_EF_SEARCH = int(os.getenv("SUPABASE_EF_SEARCH", "30"))
 
 ACRONYM_MAP = {
     "TCP": "The Collaborative Process",
@@ -75,6 +74,7 @@ class RAGService:
         self.supabase_key = os.getenv("SUPABASE_KEY")
         if not self.supabase_url or not self.supabase_key:
             raise ValueError("Supabase URL and key must be set in environment variables.")
+        self.supabase_ef_search = SUPABASE_EF_SEARCH
 
         self.supabase_headers = {
             "apikey": self.supabase_key,
@@ -128,13 +128,21 @@ class RAGService:
             self.logger.exception("Error generating embedding")
             raise RuntimeError("Embedding generation failed")
 
-    async def search_similar_documents(self, query_embedding: List[float], limit: int = TOP_K) -> List[Dict[str, Any]]:
-        """Search for similar documents in Supabase via RPC, with retries."""
+    async def search_similar_documents(
+        self,
+        query_embedding: List[float],
+        limit: int = TOP_K,
+        ef_search: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for similar documents via Supabase RPC that returns IDs, then hydrate docs.
+        """
         rpc_url = f"{self.supabase_url.rstrip('/')}/rest/v1/rpc/{SUPABASE_MATCH_FN}"
         payload = {
             "query_embedding": query_embedding,
             "match_count": limit,
-            "filter": {}
+            "filter": {},
+            "ef_search": ef_search or self.supabase_ef_search,
         }
 
         # simple retry loop for the HTTP RPC call
@@ -142,11 +150,64 @@ class RAGService:
             try:
                 response = await self.client.post(rpc_url, headers=self.supabase_headers, json=payload, timeout=10.0)
                 response.raise_for_status()
-                data = response.json()
-                return data if data else []
+                id_rows = response.json() or []
+                if not id_rows:
+                    return []
+
+                # Fetch full docs by IDs to retain content/metadata for context
+                ids = [row.get("id") for row in id_rows if row.get("id") is not None]
+                if not ids:
+                    return []
+
+                # Supabase PostgREST in operator format: id=in.(1,2,3)
+                ids_str = ",".join(str(id_val) for id_val in ids)
+                table_url = f"{self.supabase_url.rstrip('/')}/rest/v1/tcp_db_v2"
+                params = {
+                    "id": f"in.({ids_str})",
+                    "select": "id,content,metadata",
+                }
+
+                doc_resp = await self.client.get(
+                    table_url,
+                    headers=self.supabase_headers,
+                    params=params,
+                    timeout=10.0,
+                )
+                doc_resp.raise_for_status()
+                docs = doc_resp.json() or []
+
+                # Create lookup dict - ensure ID types match (Supabase returns bigint as int in JSON)
+                doc_lookup = {int(doc["id"]): doc for doc in docs if "id" in doc}
+                hydrated = []
+                for row in id_rows:
+                    row_id = row.get("id")
+                    if row_id is None:
+                        continue
+                    # Ensure type consistency for lookup
+                    doc = doc_lookup.get(int(row_id))
+                    if not doc:
+                        self.logger.warning("Document ID %s from search not found in hydration", row_id)
+                        continue
+                    hydrated.append(
+                        {
+                            "id": doc.get("id"),
+                            "content": doc.get("content"),
+                            "metadata": doc.get("metadata", {}),
+                            "similarity": row.get("similarity"),
+                        }
+                    )
+                return hydrated
+
             except httpx.HTTPStatusError as e:
+                # Log the actual error response from Supabase for debugging
+                error_body = ""
+                try:
+                    if e.response:
+                        error_body = e.response.text
+                        self.logger.error("Vector search error response (attempt %s): %s", attempt + 1, error_body)
+                except:
+                    pass
                 self.logger.exception("Vector search returned HTTP error (attempt %s): %s", attempt + 1, e)
-                # If 4xx, don't retry
                 status = getattr(e.response, "status_code", None)
                 if status and 400 <= status < 500:
                     raise
@@ -625,182 +686,6 @@ Title:"""
                 "error": str(e),
                 "response_time_ms": round(response_time * 1000, 2)
             }
-# DEAD
-    async def get_gpt_response_stream(
-            self,
-            user_message: str,
-            contact_id: str,
-            session_id: Optional[str] = None,
-            max_tokens: int = 700,
-            model: Optional[str] = None,
-            history_token_limit: Optional[int] = 1000
-        ) -> AsyncGenerator[Dict[str, Any], None]:
-            """Generate a streaming RAG-based AI response using Server-Sent Events."""
-            t0 = time.monotonic()
-
-            try:
-                # Ensure we have a session
-                if not session_id:
-                    session_id = await self.memory_service.create_session(contact_id)
-
-                yield {
-                    "type": "session",
-                    "session_id": session_id,
-                    "timestamp": time.time()
-                }
-
-                # Check if this is the first message and set title if so
-                await self.handle_first_message_title(session_id, contact_id, user_message)
-                
-                await self.memory_service.add_user_message(session_id, contact_id, user_message)
-
-                yield {
-                    "type": "status",
-                    "message": "Processing query...",
-                    "timestamp": time.time()
-                }
-
-                # Expand acronyms and get embedding
-                expanded_message = expand_acronyms(user_message)
-
-                t_embed_start = time.monotonic()
-                query_embedding = await self.get_embedding(expanded_message)
-                t_embed = time.monotonic() - t_embed_start
-
-                yield {
-                    "type": "status",
-                    "message": "Searching knowledge base...",
-                    "timestamp": time.time()
-                }
-
-                # Retrieve history and docs concurrently
-                # Use token-based trimming instead of message count
-                t_io_start = time.monotonic()
-                history_task = asyncio.create_task(
-                    self.memory_service.get_conversation_history(
-                        session_id, 
-                        contact_id,
-                        max_tokens=history_token_limit,
-                        include_summary=True
-                    )
-                )
-                docs_task = asyncio.create_task(
-                    self.search_similar_documents(query_embedding, limit=TOP_K)
-                )
-                conversation_history, similar_docs = await asyncio.gather(history_task, docs_task)
-                t_io = time.monotonic() - t_io_start
-
-                # Prepare context & sources
-                sources = [{"id": d.get("id"), "metadata": d.get("metadata", {})} for d in similar_docs]
-                context = pack_context(similar_docs, char_budget=CONTEXT_CHAR_BUDGET)
-
-                yield {
-                    "type": "sources",
-                    "sources": sources,
-                    "timestamp": time.time()
-                }
-
-                # Build messages for the LLM
-                system_prompt = prompt_seven()
-                messages = [
-                    {"role": "system", "content": system_prompt.format(context=context)},
-                    *conversation_history,
-                    {"role": "user", "content": user_message},
-                ]
-
-                max_tokens = max(32, min(int(max_tokens), 1000))
-                selected_model = model if model else MODEL_NAME
-
-                valid_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o-mini"]
-                if model != "gpt-4o-mini":
-                    yield {
-                        "type": "error",
-                        "error": f"Invalid model '{model}'. Valid options: {', '.join(valid_models)}",
-                        "timestamp": time.time()
-                    }
-                    return
-
-                yield {
-                    "type": "status",
-                    "message": f"Generating response using {selected_model}...",
-                    "timestamp": time.time()
-                }
-
-                # Fixed parameter handling — always use `max_tokens`
-                model_params = get_model_params(selected_model, max_tokens)
-
-                t_llm_start = time.monotonic()
-                full_response = ""
-
-                try:
-                    stream = await self._retry_async_call(
-                        lambda: self.openai_client.chat.completions.create(
-                            model=selected_model,
-                            messages=messages,
-                            stream=True,
-                            **model_params,
-                        ),
-                        attempts=3,
-                        base_delay=1.0,
-                    )
-
-                    async for chunk in stream:
-                        try:
-                            delta = getattr(chunk.choices[0], "delta", None)
-                            content = getattr(delta, "content", None) if delta else None
-                        except Exception:
-                            content = None
-
-                        if content:
-                            full_response += content
-                            yield {
-                                "type": "content",
-                                "content": content,
-                                "timestamp": time.time()
-                            }
-
-                except Exception as e:
-                    self.logger.exception("LLM streaming call failed after retries")
-                    yield {
-                        "type": "error",
-                        "error": f"Failed to generate response: {str(e)}",
-                        "timestamp": time.time()
-                    }
-                    return
-
-                t_llm = time.monotonic() - t_llm_start
-
-                # Save the full AI response
-                if full_response:
-                    await self.memory_service.add_ai_message(session_id, contact_id, full_response)
-                    
-                    # Check and update summary if needed (async, non-blocking)
-                    asyncio.create_task(
-                        self.check_and_update_summary(session_id, contact_id)
-                    )
-
-                t_total = time.monotonic() - t0
-                self.logger.info(
-                    "rag_response_stream timings session=%s embed=%.3fs io=%.3fs llm=%.3fs total=%.3fs",
-                    session_id, t_embed, t_io, t_llm, t_total
-                )
-
-                yield {
-                    "type": "done",
-                    "session_id": session_id,
-                    "model": selected_model,
-                    "total_time": t_total,
-                    "timestamp": time.time()
-                }
-
-            except Exception as e:
-                self.logger.exception("Error generating streaming RAG response")
-                yield {
-                    "type": "error",
-                    "error": f"RAG response generation failed: {str(e)}",
-                    "timestamp": time.time()
-                }
-                    
     async def get_grok_response_stream(
                 self,
                 user_message: str,
@@ -828,7 +713,7 @@ Title:"""
                     expanded_message = expand_acronyms(user_message)
                     
                     # Check if this is the first message and set title, then store message and generate embedding concurrently
-
+                    await self.handle_first_message_title(session_id, contact_id, user_message)
 
                     store_message_task = asyncio.create_task(
                         self.memory_service.add_user_message(session_id, contact_id, user_message)
@@ -836,8 +721,6 @@ Title:"""
                     embedding_task = asyncio.create_task(
                         self.get_embedding(expanded_message)
                     )
-                    # titles_task = asyncio.create_task(
-                    await self.handle_first_message_title(session_id, contact_id, user_message)
                      
                     yield {
                         "type": "status",
@@ -847,7 +730,6 @@ Title:"""
                     
                     # Wait for all to complete
                     t_embed_start = time.monotonic()
-                    # await title_task  # Ensure title is set if needed
                     await store_message_task  # Ensure message is stored
                     query_embedding = await embedding_task
                     t_embed = time.monotonic() - t_embed_start
@@ -972,14 +854,3 @@ Title:"""
                         "timestamp": time.time()
                     }
 
-
-def get_model_params(model: str, max_tokens: int) -> Dict[str, Any]:
-    params = {}
-    new_token_models = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"]
-
-    if model in new_token_models:
-        params["max_completion_tokens"] = 2000
-    else:
-        params["max_tokens"] = max_tokens
-
-    return params
