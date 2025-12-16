@@ -120,7 +120,7 @@ def is_level_0_message(raw: str) -> bool:
         return False
     
     # Normalize: lowercase and remove apostrophes in one pass
-    t = stripped.lower().replace("'", "").replace("'", "")
+    t = stripped.lower().replace("'", "")
     
     # Fast path: check exact match first (most common case for Level 0)
     # Normalize whitespace and trailing punctuation
@@ -137,10 +137,7 @@ def is_level_0_message(raw: str) -> bool:
     # Handle questions: check if it's small-talk or information-seeking
     has_question = "?" in t
     if has_question:
-        # Check if it's a small-talk question
-        if normalized in _SMALL_TALK_QUESTIONS:
-            return True
-        # Quick check for small-talk question starters
+        # Quick check for small-talk question starters (normalized already checked above)
         if any(t.startswith(starter) for starter in _SMALL_TALK_STARTERS):
             if len(stripped) <= 25:
                 return True
@@ -897,8 +894,9 @@ Title:"""
                         )
 
                         # Build messages for LLM without RAG context
+                        # Minimal system prompt for small-talk (extracted essentials from full prompt)
                         messages = [
-                            system("You are The Collaborative Pilot, a calm, systems-minded mentor designed by Carlo Riolo, founder of The Collaborative Process (TCP). Keep responses brief and friendly for small-talk.")
+                            system("You are The Collaborative Pilot, a calm, systems-minded mentor designed by Carlo Riolo, founder of The Collaborative Process (TCP). Be warm, human, and brief. Keep responses friendly for small-talk.")
                         ]
 
                         for msg in conversation_history:
