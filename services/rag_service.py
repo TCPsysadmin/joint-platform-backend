@@ -4,6 +4,7 @@ import asyncio
 import time
 import logging
 import re
+from enum import Enum
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 import httpx
@@ -21,6 +22,164 @@ MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
 SUPABASE_MATCH_FN = os.getenv("SUPABASE_MATCH_FN", "tcpdb_v2_search_ids")  # use id-only search RPC
 SUPABASE_EF_SEARCH = int(os.getenv("SUPABASE_EF_SEARCH", "30"))
+
+# ---- Routing ----
+class Route(str, Enum):
+    """Routing enum for message handling."""
+    LEVEL_0 = "LEVEL_0"
+    FULL_RAG = "FULL_RAG"
+
+# Pre-compute Level 0 phrases as frozenset for O(1) lookup
+_LEVEL_0_PHRASES = frozenset({
+    # Greetings
+    "hi", "hello", "hey", "yo", "sup",
+    # Acknowledgments
+    "ok", "okay", "k", "kk",
+    # Thanks
+    "thanks", "thank you", "ty", "thx",
+    # Reactions
+    "lol", "lmao", "haha",
+    # Time-based greetings
+    "good morning", "good afternoon", "good evening", "good night",
+    # Conversational small-talk (normalized - no apostrophes)
+    "whats up", "what up", "wassup",
+    "how are you", "howre you", "how r u", "how ru",
+    "hows it going", "how is it going",
+    "how are things", "howre things",
+    "whats going on", "what going on",
+    "hows everything", "how is everything",
+    "whats new", "what new",
+    "how do you do", "howdy",
+    "nice to meet you", "pleased to meet you",
+    "see you", "see ya", "cya", "bye", "goodbye", "good bye",
+    "have a good day", "have a nice day",
+    "take care", "take it easy",
+    # Casual responses
+    "sure", "yep", "yeah", "yup", "nope", "nah",
+    "cool", "nice", "awesome", "great", "sounds good",
+    "got it", "gotcha", "i see", "i understand",
+    "no problem", "no worries", "all good", "its fine",
+})
+
+# Common continuation words/phrases after greetings/thanks
+_LEVEL_0_CONTINUATIONS = frozenset({
+    "there", "for", "for the", "for the help", "for that", "so much", "a lot"
+})
+
+# Small-talk question patterns (normalized - no apostrophes)
+_SMALL_TALK_QUESTIONS = frozenset({
+    "whats up", "what up", "wassup",
+    "how are you", "howre you", "how r u", "how ru",
+    "hows it going", "how is it going",
+    "how are things", "howre things",
+    "whats going on",
+    "hows everything", "how is everything",
+    "whats new",
+    "how do you do",
+})
+
+# Pre-computed prefix list (sorted by length, longest first) - created once
+_LEVEL_0_PREFIXES = tuple(sorted([
+    "good morning", "good afternoon", "good evening", "good night",
+    "thank you", "thanks",
+    "hello", "hey", "hi", "yo", "sup",
+    "okay", "ok",
+    "see you", "see ya", "cya",
+    "have a good", "have a nice",
+    "take care", "take it easy",
+    "nice to meet", "pleased to meet",
+], key=len, reverse=True))
+
+# Information-seeking question patterns (pre-computed tuple)
+_INFO_SEEKING_PATTERNS = ("what is", "what are", "how do", "how can", "why", "when", "where", "who is", "which")
+
+# Small-talk question starters (for quick check)
+_SMALL_TALK_STARTERS = ("whats up", "how are", "hows")
+
+# Compiled regex patterns (created once, reused)
+_RE_TRAILING_PUNCT = re.compile(r"[!.…,?]+$")
+_RE_WHITESPACE = re.compile(r"\s+")
+
+
+def is_level_0_message(raw: str) -> bool:
+    """
+    Classifier for Level 0 small-talk messages.
+    Highly optimized with early exits and pre-computed constants.
+    Returns True for obvious small-talk that should bypass retrieval.
+    """
+    # Fast path: empty or None check - treat as Level 0 (no retrieval needed)
+    if not raw:
+        return True
+    
+    stripped = raw.strip()
+    if not stripped:
+        return True
+    
+    # Fast path: length check (reject very long messages early)
+    if len(stripped) > 50:
+        return False
+    
+    # Normalize: lowercase and remove apostrophes in one pass
+    t = stripped.lower().replace("'", "").replace("'", "")
+    
+    # Fast path: check exact match first (most common case for Level 0)
+    # Normalize whitespace and trailing punctuation
+    normalized = _RE_TRAILING_PUNCT.sub("", t)
+    normalized = _RE_WHITESPACE.sub(" ", normalized).strip()
+    
+    if normalized in _LEVEL_0_PHRASES:
+        return True
+    
+    # Check small-talk questions
+    if normalized in _SMALL_TALK_QUESTIONS:
+        return True
+    
+    # Handle questions: check if it's small-talk or information-seeking
+    has_question = "?" in t
+    if has_question:
+        # Check if it's a small-talk question
+        if normalized in _SMALL_TALK_QUESTIONS:
+            return True
+        # Quick check for small-talk question starters
+        if any(t.startswith(starter) for starter in _SMALL_TALK_STARTERS):
+            if len(stripped) <= 25:
+                return True
+        # Real question -> Full RAG
+        return False
+    
+    # Check prefix patterns (for continuations like "hello there")
+    for prefix in _LEVEL_0_PREFIXES:
+        if t.startswith(prefix):
+            remaining = t[len(prefix):].strip()
+            # Fast exits
+            if not remaining:
+                return True
+            if remaining in _LEVEL_0_CONTINUATIONS:
+                return True
+            if remaining.startswith("for ") and len(remaining) <= 20:
+                return True
+            if remaining == "there" or remaining.startswith("there "):
+                return True
+            # Check for information-seeking patterns
+            if any(remaining.startswith(pattern) for pattern in _INFO_SEEKING_PATTERNS):
+                return False
+            # Short continuations are Level 0
+            if len(remaining) <= 15:
+                return True
+            # Long continuations are likely queries
+            if len(remaining) > 30:
+                return False
+    
+    # Default: not Level 0
+    return False
+
+
+def route_message(message: str) -> Route:
+    """
+    Route a message to either Level 0 (small-talk) or Full RAG.
+    Optimized to minimize overhead for Full RAG path.
+    """
+    return Route.LEVEL_0 if is_level_0_message(message) else Route.FULL_RAG
 
 ACRONYM_MAP = {
     "TCP": "The Collaborative Process",
@@ -712,12 +871,109 @@ Title:"""
                     # Start message storage and embedding generation in parallel
                     expanded_message = expand_acronyms(user_message)
                     
-                    # Check if this is the first message and set title, then store message and generate embedding concurrently
+                    # Check if this is the first message and set title
                     await self.handle_first_message_title(session_id, contact_id, user_message)
 
-                    store_message_task = asyncio.create_task(
-                        self.memory_service.add_user_message(session_id, contact_id, user_message)
-                    )
+                    # Store user message (before routing, as per spec)
+                    await self.memory_service.add_user_message(session_id, contact_id, user_message)
+
+                    # Route message to determine if we should skip retrieval
+                    route = route_message(user_message)
+
+                    if route == Route.LEVEL_0:
+                        # Level 0: Skip retrieval, use simple LLM call
+                        yield {
+                            "type": "status",
+                            "message": "Processing query...",
+                            "timestamp": time.time()
+                        }
+
+                        # Get conversation history (for context, but no RAG documents)
+                        conversation_history = await self.memory_service.get_conversation_history(
+                            session_id,
+                            contact_id,
+                            max_tokens=history_token_limit,
+                            include_summary=True
+                        )
+
+                        # Build messages for LLM without RAG context
+                        messages = [
+                            system("You are The Collaborative Pilot, a calm, systems-minded mentor designed by Carlo Riolo, founder of The Collaborative Process (TCP). Keep responses brief and friendly for small-talk.")
+                        ]
+
+                        for msg in conversation_history:
+                            if msg["role"] == "assistant":
+                                messages.append(assistant(msg["content"]))
+                            else:
+                                messages.append(user(msg["content"]))
+                        messages.append(user(user_message))
+
+                        max_tokens = 1200
+                        selected_model = "grok-4-1-fast-reasoning"
+
+                        t_llm_start = time.monotonic()
+                        full_response = ""
+
+                        try:
+                            chat = await self._retry_async_call(
+                                lambda: asyncio.to_thread(
+                                    self.grok_client.chat.create,
+                                    model=selected_model,
+                                    max_tokens=max_tokens,
+                                    messages=messages,
+                                ),
+                                attempts=2,
+                                base_delay=0.5,
+                            )
+
+                            async for response, chunk in chat.stream():
+                                content = getattr(chunk, "content", None)
+                                if content:
+                                    full_response += content
+                                    yield {
+                                        "type": "content",
+                                        "content": content,
+                                        "timestamp": time.time()
+                                    }
+
+                        except Exception as e:
+                            self.logger.exception("LLM streaming call failed after retries")
+                            yield {
+                                "type": "error",
+                                "error": f"Failed to generate response: {str(e)}",
+                                "timestamp": time.time()
+                            }
+                            return
+                        finally:
+                            t_llm = time.monotonic() - t_llm_start
+
+                        # Save the full AI response (non-blocking)
+                        if full_response:
+                            asyncio.create_task(
+                                self.memory_service.add_ai_message(session_id, contact_id, full_response)
+                            )
+                            asyncio.create_task(
+                                self.check_and_update_summary(session_id, contact_id)
+                            )
+
+                        t_total = time.monotonic() - t0
+                        self.logger.info(
+                            "level_0_response_stream timings session=%s llm=%.3fs total=%.3fs",
+                            session_id, t_llm, t_total
+                        )
+
+                        yield {
+                            "type": "done",
+                            "session_id": session_id,
+                            "model": selected_model,
+                            "total_time": t_total,
+                            "timestamp": time.time()
+                        }
+                        return
+
+                    # FULL_RAG: Continue with existing RAG pipeline
+                    # Start embedding generation
+                    expanded_message = expand_acronyms(user_message)
                     embedding_task = asyncio.create_task(
                         self.get_embedding(expanded_message)
                     )
@@ -728,9 +984,8 @@ Title:"""
                         "timestamp": time.time()
                     }
                     
-                    # Wait for all to complete
+                    # Wait for embedding to complete
                     t_embed_start = time.monotonic()
-                    await store_message_task  # Ensure message is stored
                     query_embedding = await embedding_task
                     t_embed = time.monotonic() - t_embed_start
 
