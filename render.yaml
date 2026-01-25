@@ -30,7 +30,7 @@ services:
       - key: MAX_CONNECTIONS
         value: 1000
       - key: CORS_ALLOWED_ORIGINS
-        value: "*"
+        value: "https://co-p.ai,https://www.co-p.ai,https://v1-collaborative-pilot-ui.vercel.app"
       - key: HOST
         value: 0.0.0.0
       - key: PORT
