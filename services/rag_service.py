@@ -1034,7 +1034,7 @@ Title:"""
                             messages.append(user(msg["content"]))
                     messages.append(user(user_message))
 
-                    max_tokens = 1200
+                    max_tokens = 1350
                     selected_model = "grok-4-1-fast-reasoning"
 
                     t_llm_start = time.monotonic()
