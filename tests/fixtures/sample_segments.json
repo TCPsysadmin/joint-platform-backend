@@ -1,0 +1,32 @@
+[
+  {
+    "segment_id": "seg-001",
+    "video_id": "vid-abc",
+    "text": "The biggest mistake most creators make is they try to appeal to everyone, which means they appeal to no one.",
+    "start_seconds": 42.5,
+    "end_seconds": 53.1,
+    "has_timestamps": true,
+    "score": 0.94,
+    "metadata": {}
+  },
+  {
+    "segment_id": "seg-002",
+    "video_id": "vid-abc",
+    "text": "Consistency beats perfection every single time. Show up, ship it, iterate.",
+    "start_seconds": 120.0,
+    "end_seconds": 128.5,
+    "has_timestamps": true,
+    "score": 0.88,
+    "metadata": {}
+  },
+  {
+    "segment_id": "seg-003",
+    "video_id": "vid-xyz",
+    "text": "If you can explain your value in one sentence, you understand your business.",
+    "start_seconds": 0.0,
+    "end_seconds": 0.0,
+    "has_timestamps": false,
+    "score": 0.82,
+    "metadata": {}
+  }
+]

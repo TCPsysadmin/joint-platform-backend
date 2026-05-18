@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: video-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /readyz
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: LANGCHAIN_TRACING_V2
+        value: "false"
+      - key: LANGCHAIN_API_KEY
+        sync: false
+      - key: MAX_CRITIQUE_ITERATIONS
+        value: "3"
+      - key: EMBEDDING_MODEL
+        value: "text-embedding-3-small"
+      - key: LLM_MODEL
+        value: "claude-sonnet-4-6"
+      - key: USE_MCP_TOOLS
+        value: "false"
+      - key: LOG_LEVEL
+        value: "INFO"
