@@ -14,17 +14,19 @@ from orchestrator.tools.protocols import (
 )
 from tests.conftest import FAKE_CLIENT_ID
 
-
 # ── Protocol conformance (structural) ─────────────────────────────────────────
+
 
 def test_supabase_search_tool_satisfies_protocol() -> None:
     from unittest.mock import MagicMock
+
     tool = SupabaseSearchTool(supabase=MagicMock(), client_id=FAKE_CLIENT_ID)
     assert isinstance(tool, SearchTool)
 
 
 def test_supabase_doctrine_tool_satisfies_protocol() -> None:
     from unittest.mock import MagicMock
+
     tool = SupabaseDoctrineTool(supabase=MagicMock(), client_id=FAKE_CLIENT_ID)
     assert isinstance(tool, DoctrineTool)
 
@@ -35,6 +37,7 @@ def test_opusclip_stub_satisfies_protocol() -> None:
 
 
 # ── OpusClipStub functional test (no real I/O) ───────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_opusclip_stub_returns_publish_result() -> None:
@@ -55,6 +58,7 @@ async def test_opusclip_stub_returns_publish_result() -> None:
 
 
 # ── Embedder protocol ─────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_mock_embedder_returns_embedding(mock_embedder: object) -> None:

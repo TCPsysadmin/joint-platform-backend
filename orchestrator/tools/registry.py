@@ -27,9 +27,7 @@ def get_tools(supabase: AsyncClient, client_id: UUID) -> ToolSet:
     from orchestrator.config import settings  # local import avoids circular dep at module level
 
     if settings.use_mcp_tools:
-        raise NotImplementedError(
-            "MCP tools are not yet implemented. Set USE_MCP_TOOLS=false."
-        )
+        raise NotImplementedError("MCP tools are not yet implemented. Set USE_MCP_TOOLS=false.")
 
     from orchestrator.tools.local.doctrine import SupabaseDoctrineTool
     from orchestrator.tools.local.opusclip_stub import OpusClipStub

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -12,7 +12,6 @@ from langchain_core.messages import AIMessage
 from orchestrator.runtime import RuntimeContext
 from orchestrator.tools.protocols import (
     AssetHit,
-    ClipPayload,
     Doctrine,
     PublishResult,
     TranscriptHit,
@@ -22,9 +21,7 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 
 FAKE_CLIENT_ID = UUID("00000000-0000-0000-0000-000000000001")
 
-SAMPLE_SEGMENTS: list[dict[str, Any]] = json.loads(
-    (_FIXTURES / "sample_segments.json").read_text()
-)
+SAMPLE_SEGMENTS: list[dict[str, Any]] = json.loads((_FIXTURES / "sample_segments.json").read_text())
 
 
 @pytest.fixture
@@ -47,14 +44,16 @@ def sample_hits() -> list[TranscriptHit]:
 def mock_search_tool(sample_hits: list[TranscriptHit]) -> AsyncMock:
     tool = AsyncMock()
     tool.search_transcripts = AsyncMock(return_value=sample_hits)
-    tool.match_assets = AsyncMock(return_value=[
-        AssetHit(
-            asset_id="asset-001",
-            asset_type="broll_prompt",
-            description="Creator looking into camera, confident expression",
-            score=0.91,
-        )
-    ])
+    tool.match_assets = AsyncMock(
+        return_value=[
+            AssetHit(
+                asset_id="asset-001",
+                asset_type="broll_prompt",
+                description="Creator looking into camera, confident expression",
+                score=0.91,
+            )
+        ]
+    )
     return tool
 
 
@@ -109,9 +108,7 @@ def mock_embedder() -> AsyncMock:
 def _make_llm_mock(*responses: str) -> AsyncMock:
     """Create an LLM mock that returns each response string in order."""
     llm = AsyncMock()
-    llm.ainvoke = AsyncMock(
-        side_effect=[AIMessage(content=r) for r in responses]
-    )
+    llm.ainvoke = AsyncMock(side_effect=[AIMessage(content=r) for r in responses])
     return llm
 
 
@@ -130,26 +127,38 @@ def mock_llm_full_flow() -> AsyncMock:
         # route_intent
         '{"intent": "new_request", "user_query": "best hook moments about consistency"}',
         # analyze
-        json.dumps({
-            "video_id": "vid-abc",
-            "segment_id": "seg-001",
-            "start_seconds": 42.5,
-            "end_seconds": 53.1,
-            "has_timestamps": True,
-            "hook_quote": "The biggest mistake most creators make is they try to appeal to everyone",
-            "rationale": "Strong contrarian hook that challenges conventional wisdom.",
-            "broll_suggestions": [],
-        }),
+        json.dumps(
+            {
+                "video_id": "vid-abc",
+                "segment_id": "seg-001",
+                "start_seconds": 42.5,
+                "end_seconds": 53.1,
+                "has_timestamps": True,
+                "hook_quote": "The biggest mistake most creators make is they try to appeal to everyone",
+                "rationale": "Strong contrarian hook that challenges conventional wisdom.",
+                "broll_suggestions": [],
+            }
+        ),
         # critique
-        json.dumps({
-            "dimension_scores": [
-                {"dimension": "hook_strength", "score": 0.9, "rationale": "Excellent pattern interrupt."},
-                {"dimension": "brand_alignment", "score": 0.85, "rationale": "Aligned with brand voice."},
-            ],
-            "weighted_score": 0.875,
-            "overall_rationale": "Strong candidate.",
-            "improvement_suggestions": [],
-        }),
+        json.dumps(
+            {
+                "dimension_scores": [
+                    {
+                        "dimension": "hook_strength",
+                        "score": 0.9,
+                        "rationale": "Excellent pattern interrupt.",
+                    },
+                    {
+                        "dimension": "brand_alignment",
+                        "score": 0.85,
+                        "rationale": "Aligned with brand voice.",
+                    },
+                ],
+                "weighted_score": 0.875,
+                "overall_rationale": "Strong candidate.",
+                "improvement_suggestions": [],
+            }
+        ),
         # recommend
         "## Your Clip Recommendation\n\n> The biggest mistake most creators make...\n\n**Score: 87.5%**",
     )
@@ -171,4 +180,5 @@ def make_runtime(
             llm=llm,
             embedder=mock_embedder,
         )
+
     return _make

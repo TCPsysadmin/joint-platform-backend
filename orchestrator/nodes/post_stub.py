@@ -21,7 +21,11 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         logger.info("post_skipped_not_approved", session_id=state.get("session_id"))
         return {
             "awaiting_confirmation": False,
-            "messages": [AIMessage(content="Got it — clip not posted. Let me know if you'd like to try a different clip.")],
+            "messages": [
+                AIMessage(
+                    content="Got it — clip not posted. Let me know if you'd like to try a different clip."
+                )
+            ],
         }
 
     candidate: dict[str, Any] = dict(state.get("candidate_recommendation") or {})

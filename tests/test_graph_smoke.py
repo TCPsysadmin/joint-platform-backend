@@ -54,7 +54,9 @@ async def test_graph_chitchat_path(make_runtime: Any, mock_llm_chitchat: Any) ->
     }
 
     final_state: AgentState | None = None
-    async for chunk in graph.astream(_base_input("chitchat-session"), config=config, stream_mode="values"):
+    async for chunk in graph.astream(
+        _base_input("chitchat-session"), config=config, stream_mode="values"
+    ):
         final_state = chunk
 
     assert final_state is not None
@@ -90,9 +92,7 @@ async def test_graph_new_request_pauses_before_post(
 
 
 @pytest.mark.asyncio
-async def test_graph_confirm_approved_resumes(
-    make_runtime: Any, mock_llm_full_flow: Any
-) -> None:
+async def test_graph_confirm_approved_resumes(make_runtime: Any, mock_llm_full_flow: Any) -> None:
     runtime: RuntimeContext = make_runtime(mock_llm_full_flow)
     checkpointer = MemorySaver()
     graph = build_graph(checkpointer=checkpointer)

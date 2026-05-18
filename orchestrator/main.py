@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -38,6 +39,7 @@ app = FastAPI(title="video-agent", version=_VERSION, lifespan=lifespan)
 
 # ── Request / response models ──────────────────────────────────────────────────
 
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -49,6 +51,7 @@ class ConfirmRequest(BaseModel):
 
 
 # ── Exception handlers ─────────────────────────────────────────────────────────
+
 
 @app.exception_handler(AuthError)
 async def auth_error_handler(_: Request, exc: AuthError) -> JSONResponse:
@@ -63,11 +66,13 @@ async def agent_error_handler(_: Request, exc: AgentError) -> JSONResponse:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _sse(event: str, data: dict[str, Any]) -> dict[str, str]:
     return {"event": event, "data": json.dumps(data)}
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
 
 @app.post("/chat")
 async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:

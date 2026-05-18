@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import structlog
 from uuid import uuid4
+
+import structlog
 
 from orchestrator.tools.protocols import ClipPayload, PublishResult
 

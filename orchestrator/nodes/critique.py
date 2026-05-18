@@ -32,9 +32,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     # Renormalize weights over remaining dimensions.
     total_weight: float = sum(float(d.get("weight", 1.0)) for d in rubric)
     if total_weight > 0:
-        rubric = [
-            {**d, "weight": float(d.get("weight", 1.0)) / total_weight} for d in rubric
-        ]
+        rubric = [{**d, "weight": float(d.get("weight", 1.0)) / total_weight} for d in rubric]
 
     messages = [
         SystemMessage(content=prompt),
