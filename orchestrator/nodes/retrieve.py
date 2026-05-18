@@ -7,6 +7,7 @@ import structlog
 from langchain_core.runnables import RunnableConfig
 
 from orchestrator.config import settings
+from orchestrator.doctrine_defaults import default_brand_doctrine_dict
 from orchestrator.errors import RetrievalError
 from orchestrator.runtime import RuntimeContext
 from orchestrator.state import AgentState
@@ -18,6 +19,13 @@ _FORCED_NOTE = "Best available match — further refinement did not surface new 
 
 async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
+
+    doctrine_patch: dict[str, Any] = {}
+    if not settings.require_brand_doctrine and state.get("brand_doctrine") is None:
+        doctrine_patch["brand_doctrine"] = default_brand_doctrine_dict(
+            runtime.client_id,
+            permissive=True,
+        )
 
     query = state.get("refined_query") or state.get("user_query") or ""
     iteration_count = state.get("iteration_count", 0)
@@ -31,12 +39,13 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             session_id=state.get("session_id"),
         )
         return {
+            **doctrine_patch,
             "critique_result": {
                 **prior_critique,
                 "verdict": "approved",
                 "forced": True,
                 "note": _FORCED_NOTE,
-            }
+            },
         }
 
     try:
@@ -68,6 +77,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     if top5_ids == prev_ids[:5] and prior_critique is not None:
         logger.info("retrieve_forced_approve_stale", session_id=state.get("session_id"))
         return {
+            **doctrine_patch,
             "retrieved_segments": segments,
             "previous_segment_ids": top5_ids,
             "critique_result": {
@@ -79,6 +89,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         }
 
     return {
+        **doctrine_patch,
         "retrieved_segments": segments,
         "previous_segment_ids": top5_ids,
     }

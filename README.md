@@ -29,8 +29,7 @@ graph TD
     end
 
     Graph --> Supabase[(Supabase)]
-    Graph --> Anthropic[Claude API]
-    Graph --> OpenAI[Embeddings]
+    Graph --> OpenAI[OpenAI LLM + Embeddings]
 ```
 
 ### Runtime context
@@ -84,12 +83,11 @@ uvicorn orchestrator.main:app --reload
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | ✓ | — | Claude API key |
 | `SUPABASE_URL` | ✓ | — | Supabase project URL |
 | `SUPABASE_SERVICE_KEY` | ✓ | — | Service-role key (bypasses RLS) |
 | `SUPABASE_DB_URL` | ✓ | — | Postgres connection string for checkpointer |
-| `OPENAI_API_KEY` | ✓ | — | Embeddings |
-| `LLM_MODEL` | | `claude-sonnet-4-6` | Anthropic model ID |
+| `OPENAI_API_KEY` | ✓ | — | LLM + embeddings |
+| `LLM_MODEL` | | `gpt-4o` | OpenAI chat model ID |
 | `EMBEDDING_MODEL` | | `text-embedding-3-small` | OpenAI embedding model |
 | `MAX_CRITIQUE_ITERATIONS` | | `3` | Max critique/refine loops before forced approval |
 | `USE_MCP_TOOLS` | | `false` | Toggle to switch to MCP tool implementations |

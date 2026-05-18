@@ -12,6 +12,7 @@ from orchestrator.nodes import post_stub
 from orchestrator.nodes import recommend
 from orchestrator.nodes import refine
 from orchestrator.nodes import retrieve
+from orchestrator.config import settings
 from orchestrator.nodes import route_intent
 from orchestrator.state import AgentState
 
@@ -19,10 +20,12 @@ from orchestrator.state import AgentState
 def _intent_router(state: AgentState) -> str:
     intent = state.get("intent")
     if intent == "chitchat":
-        return "chat_response"
+        return "chitchat"
     if intent == "follow_up":
-        return "recommend"
-    return "fetch_doctrine"
+        return "follow_up"
+    if settings.require_brand_doctrine:
+        return "fetch_doctrine"
+    return "retrieve"
 
 
 def _retrieve_router(state: AgentState) -> str:
@@ -63,7 +66,12 @@ def build_graph(
     builder.add_conditional_edges(
         "route_intent",
         _intent_router,
-        {"chitchat": "chat_response", "follow_up": "recommend", "fetch_doctrine": "fetch_doctrine"},
+        {
+            "chitchat": "chat_response",
+            "follow_up": "recommend",
+            "fetch_doctrine": "fetch_doctrine",
+            "retrieve": "retrieve",
+        },
     )
 
     builder.add_edge("chat_response", END)

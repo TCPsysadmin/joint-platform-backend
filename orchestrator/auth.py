@@ -4,8 +4,9 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException, Request
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
+from pydantic import SecretStr
 from supabase import AsyncClient, create_async_client
 
 from orchestrator.config import settings
@@ -57,12 +58,12 @@ async def resolve_runtime(request: Request) -> RuntimeContext:
 
     tools = registry.get_tools(supabase, client_id)
 
-    llm = ChatAnthropic(  # type: ignore[call-arg]
-        model=settings.llm_model,
-        api_key=settings.anthropic_api_key,
-    )
-
     openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+    llm = ChatOpenAI(
+        model=settings.llm_model,
+        api_key=SecretStr(settings.openai_api_key),
+    )
     embedder = _OpenAIEmbedder(client=openai_client, model=settings.embedding_model)
 
     return RuntimeContext(

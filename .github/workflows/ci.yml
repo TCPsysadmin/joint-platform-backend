@@ -32,7 +32,6 @@ jobs:
       - name: Pytest
         run: pytest tests/ -v
         env:
-          ANTHROPIC_API_KEY: "test-key"
           SUPABASE_URL: "https://test.supabase.co"
           SUPABASE_SERVICE_KEY: "test-key"
           SUPABASE_DB_URL: "postgresql://test:test@localhost/test"

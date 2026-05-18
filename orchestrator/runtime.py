@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from orchestrator.tools.protocols import DoctrineTool, Embedder, PublishTool, SearchTool
 
@@ -19,5 +19,5 @@ class RuntimeContext:
     search_tool: SearchTool
     doctrine_tool: DoctrineTool
     publish_tool: PublishTool
-    llm: ChatAnthropic
+    llm: BaseChatModel
     embedder: Embedder

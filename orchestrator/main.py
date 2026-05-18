@@ -91,25 +91,30 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
     }
 
     async def generate() -> AsyncGenerator[dict[str, str], None]:
-        async for chunk in graph.astream(
-            input_state,
-            config=thread_config,
-            stream_mode="updates",
-        ):
-            for node_name, node_update in chunk.items():
-                safe_update = {
-                    k: v
-                    for k, v in node_update.items()
-                    if k not in ("messages",) and isinstance(v, (str, int, float, bool, list, dict, type(None)))
-                }
-                yield _sse("node", {"node": node_name, "partial_state": safe_update})
+        try:
+            async for chunk in graph.astream(
+                input_state,
+                config=thread_config,
+                stream_mode="updates",
+            ):
+                for node_name, node_update in chunk.items():
+                    safe_update = {
+                        k: v
+                        for k, v in node_update.items()
+                        if k not in ("messages",)
+                        and isinstance(v, (str, int, float, bool, list, dict, type(None)))
+                    }
+                    yield _sse("node", {"node": node_name, "partial_state": safe_update})
 
-        graph_state = await graph.aget_state(thread_config)
-        if graph_state.next and "post_stub" in graph_state.next:
-            final_rec = graph_state.values.get("final_recommendation")
-            yield _sse("awaiting_confirmation", {"recommendation": final_rec})
-        else:
-            yield _sse("done", {})
+            graph_state = await graph.aget_state(thread_config)
+            if graph_state.next and "post_stub" in graph_state.next:
+                final_rec = graph_state.values.get("final_recommendation")
+                yield _sse("awaiting_confirmation", {"recommendation": final_rec})
+            else:
+                yield _sse("done", {})
+        except AgentError as exc:
+            logger.error("chat_stream_failed", error=str(exc))
+            yield _sse("error", {"detail": str(exc)})
 
     return EventSourceResponse(generate())
 
