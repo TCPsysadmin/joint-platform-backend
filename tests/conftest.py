@@ -20,6 +20,7 @@ from orchestrator.tools.protocols import (
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 FAKE_CLIENT_ID = UUID("00000000-0000-0000-0000-000000000001")
+FAKE_USER_ID = UUID("00000000-0000-0000-0000-000000000002")
 
 SAMPLE_SEGMENTS: list[dict[str, Any]] = json.loads((_FIXTURES / "sample_segments.json").read_text())
 
@@ -174,6 +175,7 @@ def make_runtime(
     def _make(llm: AsyncMock) -> RuntimeContext:
         return RuntimeContext(
             client_id=FAKE_CLIENT_ID,
+            user_id=FAKE_USER_ID,
             search_tool=mock_search_tool,
             doctrine_tool=mock_doctrine_tool,
             publish_tool=mock_publish_tool,

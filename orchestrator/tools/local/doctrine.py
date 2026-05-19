@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from supabase import AsyncClient
 
+from orchestrator.supabase_json import as_dict_list
 from orchestrator.tools.protocols import Doctrine
 
 
@@ -23,12 +24,12 @@ def parse_doctrine_row(data: dict[str, object], client_id: UUID) -> Doctrine:
     auto_reject_below = 0.45
 
     if isinstance(rubric_raw, dict):
-        rubric_obj: dict[str, Any] = rubric_raw  # type: ignore[assignment]
+        rubric_obj = cast(dict[str, Any], rubric_raw)
         dimensions = list(rubric_obj.get("dimensions") or [])
         minimum_a_tier_score = float(rubric_obj.get("minimum_a_tier_score", minimum_a_tier_score))
         auto_reject_below = float(rubric_obj.get("auto_reject_below", auto_reject_below))
     elif isinstance(rubric_raw, list):
-        dimensions = list(rubric_raw)  # type: ignore[arg-type]
+        dimensions = [d for d in rubric_raw if isinstance(d, dict)]
     else:
         dimensions = []
 
@@ -58,8 +59,7 @@ class SupabaseDoctrineTool:
             .limit(1)
             .execute()
         )
-        rows = response.data or []
+        rows = as_dict_list(response.data if response else None)
         if not rows:
             raise ValueError(f"No active brand doctrine for client {self._client_id}")
-        data: dict[str, object] = rows[0]
-        return parse_doctrine_row(data, self._client_id)
+        return parse_doctrine_row(rows[0], self._client_id)

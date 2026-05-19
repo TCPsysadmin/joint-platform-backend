@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 import structlog
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from orchestrator.errors import LLMError
@@ -46,6 +46,9 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     logger.info("recommendation_formatted", session_id=state.get("session_id"))
 
     return {
+        # Add to messages so the recommendation appears in session history
+        # and is visible when GET /sessions/{id}/messages is called.
+        "messages": [AIMessage(content=final_recommendation)],
         "final_recommendation": final_recommendation,
         "awaiting_confirmation": True,
     }

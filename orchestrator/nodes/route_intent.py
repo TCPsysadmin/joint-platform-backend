@@ -7,6 +7,8 @@ import structlog
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from orchestrator.config import settings
+from orchestrator.context import build_context_window
 from orchestrator.errors import LLMError
 from orchestrator.prompts import load_prompt
 from orchestrator.runtime import RuntimeContext
@@ -19,7 +21,8 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
     prompt = load_prompt("route_intent.md")
 
-    messages = [SystemMessage(content=prompt), *state["messages"]]
+    windowed = build_context_window(state["messages"], settings.context_window_messages)
+    messages = [SystemMessage(content=prompt), *windowed]
 
     response = await runtime.llm.ainvoke(messages)
     raw = str(response.content).strip()

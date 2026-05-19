@@ -5,6 +5,8 @@ from typing import Any
 import structlog
 from langchain_core.runnables import RunnableConfig
 
+from orchestrator.config import settings
+from orchestrator.context import build_context_window
 from orchestrator.runtime import RuntimeContext
 from orchestrator.state import AgentState
 
@@ -14,7 +16,8 @@ logger = structlog.get_logger(__name__)
 async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
 
-    response = await runtime.llm.ainvoke(state["messages"])
+    windowed = build_context_window(state["messages"], settings.context_window_messages)
+    response = await runtime.llm.ainvoke(windowed)
 
     logger.info("chat_response_generated", session_id=state.get("session_id"))
 

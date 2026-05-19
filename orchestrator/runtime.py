@@ -16,6 +16,7 @@ class RuntimeContext:
     """
 
     client_id: UUID
+    user_id: UUID
     search_tool: SearchTool
     doctrine_tool: DoctrineTool
     publish_tool: PublishTool

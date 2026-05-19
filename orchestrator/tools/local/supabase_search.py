@@ -5,6 +5,7 @@ from uuid import UUID
 
 from supabase import AsyncClient
 
+from orchestrator.supabase_json import as_dict_list
 from orchestrator.tools.protocols import AssetHit, TranscriptHit
 
 
@@ -34,9 +35,7 @@ class SupabaseSearchTool:
         ).execute()
 
         hits: list[TranscriptHit] = []
-        for row in response.data or []:
-            if not isinstance(row, dict):
-                continue
+        for row in as_dict_list(response.data if response else None):
             hits.append(
                 TranscriptHit(
                     segment_id=str(row["segment_id"]),
@@ -80,6 +79,5 @@ class SupabaseSearchTool:
                 url=None,
                 metadata={"parameters": row.get("parameters") or {}},
             )
-            for row in (response.data or [])
-            if isinstance(row, dict)
+            for row in as_dict_list(response.data if response else None)
         ]

@@ -57,7 +57,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         hits = await runtime.search_tool.search_transcripts(
             query_text=query,
             query_embedding=embedding,
-            match_count=40,
+            match_count=settings.retrieve_match_count,
         )
     except Exception as exc:
         raise RetrievalError(f"Transcript search failed: {exc}") from exc

@@ -49,9 +49,9 @@ def _critique_router(state: AgentState) -> str:
 
 
 def build_graph(
-    checkpointer: BaseCheckpointSaver | None = None,
-) -> CompiledStateGraph:
-    builder: StateGraph = StateGraph(AgentState)
+    checkpointer: BaseCheckpointSaver | None = None,  # type: ignore[type-arg]
+) -> CompiledStateGraph:  # type: ignore[type-arg]
+    builder: StateGraph = StateGraph(AgentState)  # type: ignore[type-arg]
 
     builder.add_node("route_intent", route_intent.run)
     builder.add_node("chat_response", chat_response.run)

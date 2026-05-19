@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     supabase_url: str
+    supabase_anon_key: str
     supabase_service_key: str
     supabase_db_url: str
     openai_api_key: str
@@ -20,6 +21,11 @@ class Settings(BaseSettings):
     use_mcp_tools: bool = False
     log_level: str = "INFO"
     require_brand_doctrine: bool = True
+    context_window_messages: int = 12  # sliding window: last N messages sent to LLM
+    retrieve_match_count: int = 15  # hybrid_search_transcripts top-K (ranked by relevance)
+    # Comma-separated list of allowed CORS origins. Use "*" for dev/testing.
+    # Set to your frontend URL(s) in production, e.g. "https://app.example.com"
+    cors_origins: str = "*"
 
 
 settings = Settings()  # type: ignore[call-arg]
