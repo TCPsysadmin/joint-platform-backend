@@ -23,19 +23,19 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     query = state.get("refined_query") or state.get("user_query") or ""
     segments = state.get("retrieved_segments") or []
     doctrine = state.get("brand_doctrine") or {}
+    source_file_content = state.get("source_file_content")
+
+    payload: dict[str, object] = {
+        "user_query": query,
+        "segments": segments,
+        "brand_doctrine": doctrine,
+    }
+    if source_file_content:
+        payload["source_file_content"] = source_file_content
 
     messages = [
         SystemMessage(content=prompt),
-        HumanMessage(
-            content=json.dumps(
-                {
-                    "user_query": query,
-                    "segments": segments,
-                    "brand_doctrine": doctrine,
-                },
-                default=str,
-            )
-        ),
+        HumanMessage(content=json.dumps(payload, default=str)),
     ]
 
     response = await runtime.llm.ainvoke(messages)

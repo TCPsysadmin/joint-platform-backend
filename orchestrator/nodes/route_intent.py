@@ -51,6 +51,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "previous_segment_ids": [],
                 "retrieved_segments": [],
                 "brand_doctrine": None,
+                "source_file_content": None,
                 "candidate_recommendation": None,
                 "critique_result": None,
                 "final_recommendation": None,

@@ -106,6 +106,18 @@ def mock_embedder() -> AsyncMock:
     return embedder
 
 
+@pytest.fixture
+def mock_file_tool() -> AsyncMock:
+    tool = AsyncMock()
+    tool.fetch_source_file = AsyncMock(return_value=None)
+    tool.list_buckets = AsyncMock(return_value=[])
+    tool.list_file_names = AsyncMock(return_value=([], None))
+    tool.list_file_versions = AsyncMock(return_value=([], None, None))
+    tool.list_keys = AsyncMock(return_value=([], None))
+    tool.find_file_by_name = AsyncMock(return_value=None)
+    return tool
+
+
 def _make_llm_mock(*responses: str) -> AsyncMock:
     """Create an LLM mock that returns each response string in order."""
     llm = AsyncMock()
@@ -170,6 +182,7 @@ def make_runtime(
     mock_search_tool: AsyncMock,
     mock_doctrine_tool: AsyncMock,
     mock_publish_tool: AsyncMock,
+    mock_file_tool: AsyncMock,
     mock_embedder: AsyncMock,
 ) -> Any:
     def _make(llm: AsyncMock) -> RuntimeContext:
@@ -179,6 +192,7 @@ def make_runtime(
             search_tool=mock_search_tool,
             doctrine_tool=mock_doctrine_tool,
             publish_tool=mock_publish_tool,
+            file_tool=mock_file_tool,
             llm=llm,
             embedder=mock_embedder,
         )

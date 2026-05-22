@@ -16,6 +16,7 @@ class AgentState(TypedDict):
     previous_segment_ids: list[str]
     retrieved_segments: list[dict[str, object]]
     brand_doctrine: dict[str, object] | None
+    source_file_content: str | None
     candidate_recommendation: dict[str, object] | None
     critique_result: dict[str, object] | None
     final_recommendation: str | None

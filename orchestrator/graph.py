@@ -10,6 +10,7 @@ from orchestrator.nodes import (
     chat_response,
     critique,
     fetch_doctrine,
+    fetch_source,
     post_stub,
     recommend,
     refine,
@@ -31,11 +32,11 @@ def _intent_router(state: AgentState) -> str:
 
 
 def _retrieve_router(state: AgentState) -> str:
-    """After retrieve: skip analyze if we've already force-approved."""
+    """After retrieve: skip fetch_source+analyze if we've already force-approved."""
     critique_result = state.get("critique_result") or {}
     if critique_result.get("forced") and critique_result.get("verdict") == "approved":
         return "recommend"
-    return "analyze"
+    return "fetch_source"
 
 
 def _critique_router(state: AgentState) -> str:
@@ -57,6 +58,7 @@ def build_graph(
     builder.add_node("chat_response", chat_response.run)
     builder.add_node("fetch_doctrine", fetch_doctrine.run)
     builder.add_node("retrieve", retrieve.run)
+    builder.add_node("fetch_source", fetch_source.run)
     builder.add_node("analyze", analyze.run)
     builder.add_node("critique", critique.run)
     builder.add_node("refine", refine.run)
@@ -82,9 +84,10 @@ def build_graph(
     builder.add_conditional_edges(
         "retrieve",
         _retrieve_router,
-        {"analyze": "analyze", "recommend": "recommend"},
+        {"fetch_source": "fetch_source", "recommend": "recommend"},
     )
 
+    builder.add_edge("fetch_source", "analyze")
     builder.add_edge("analyze", "critique")
 
     builder.add_conditional_edges(

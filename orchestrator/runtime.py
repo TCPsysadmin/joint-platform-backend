@@ -5,7 +5,7 @@ from uuid import UUID
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from orchestrator.tools.protocols import DoctrineTool, Embedder, PublishTool, SearchTool
+from orchestrator.tools.protocols import DoctrineTool, Embedder, FileTool, PublishTool, SearchTool
 
 
 @dataclass
@@ -20,5 +20,6 @@ class RuntimeContext:
     search_tool: SearchTool
     doctrine_tool: DoctrineTool
     publish_tool: PublishTool
+    file_tool: FileTool
     llm: BaseChatModel
     embedder: Embedder

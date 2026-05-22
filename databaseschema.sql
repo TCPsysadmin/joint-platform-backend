@@ -52,7 +52,6 @@ grant execute on function public.current_user_id() to authenticated, anon;
 -- ---------- CLIENTS REGISTRY ----------
 -- The tenant directory. Admin-only access (no RLS — access denied via REVOKE).
 -- Holds tenant identity, plan info, and ingestion source preferences.
--- Does NOT hold Google Drive folder IDs (those live in n8n by design).
 create table if not exists public.clients_registry (
     client_id          uuid primary key default uuid_generate_v4(),
     slug               text unique not null,
@@ -114,10 +113,8 @@ create trigger trg_user_profiles_updated
 -- ============================================================================
 
 -- Returns the client_id for the current request.
--- Priority 1: explicit client_id JWT claim  →  used by service-role / n8n ingestion
---             flows that embed client_id directly in the JWT before calling Supabase.
--- Priority 2: user_profiles lookup          →  used by Supabase Auth users (JWT has
---             sub, not client_id; derived from user_profiles).
+-- Priority 1: explicit client_id JWT claim in the JWT before calling Supabase.
+-- Priority 2: user_profiles lookup for Supabase Auth users (JWT has sub, not client_id).
 -- security definer so the user_profiles subquery bypasses user_profiles' own RLS.
 create or replace function public.current_client_id()
 returns uuid
@@ -127,7 +124,7 @@ security definer
 set search_path = public
 as $$
   select coalesce(
-    -- Priority 1: explicit claim in JWT (service-role / n8n)
+    -- Priority 1: explicit claim in JWT (service-role)
     nullif(
       coalesce(current_setting('request.jwt.claims', true)::jsonb ->> 'client_id', ''),
       ''
@@ -491,7 +488,7 @@ alter table public.user_profiles       enable row level security;
 alter table public.chat_sessions       enable row level security;
 
 -- Tenant-scoped tables: read/write only your own client's rows.
--- current_client_id() resolves from JWT claim (n8n/service-role) or
+-- current_client_id() resolves from JWT claim (service-role) or
 -- user_profiles lookup (Supabase Auth users) — transparent to the policy.
 
 drop policy if exists tenant_select on public.video_summaries;
@@ -794,7 +791,7 @@ grant execute on function public.match_assets(vector, text[], integer)
 
 -- Single-call client provisioning. Creates the clients_registry row and
 -- seeds a default brand_doctrine. Call from the Supabase SQL Editor or the
--- backend admin flow. Does NOT take Google Drive folder IDs (n8n owns those).
+-- backend admin flow.
 create or replace function public.admin_provision_client(
     p_slug         text,
     p_display_name text,

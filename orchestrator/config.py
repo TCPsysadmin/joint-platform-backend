@@ -15,10 +15,15 @@ class Settings(BaseSettings):
     langchain_tracing_v2: bool = False
     langchain_api_key: str = ""
 
+    b2_key_id: str = ""
+    b2_application_key: str = ""
+
+    opusclip_api_key: str = ""
+    opusclip_api_url: str = "https://api.opus.pro/api"
+
     max_critique_iterations: int = 3
     embedding_model: str = "text-embedding-3-small"
     llm_model: str = "gpt-4o"
-    use_mcp_tools: bool = False
     log_level: str = "INFO"
     require_brand_doctrine: bool = True
     context_window_messages: int = 12  # sliding window: last N messages sent to LLM

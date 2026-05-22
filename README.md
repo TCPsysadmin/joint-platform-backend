@@ -90,7 +90,6 @@ uvicorn orchestrator.main:app --reload
 | `LLM_MODEL` | | `gpt-4o` | OpenAI chat model ID |
 | `EMBEDDING_MODEL` | | `text-embedding-3-small` | OpenAI embedding model |
 | `MAX_CRITIQUE_ITERATIONS` | | `3` | Max critique/refine loops before forced approval |
-| `USE_MCP_TOOLS` | | `false` | Toggle to switch to MCP tool implementations |
 | `LANGCHAIN_TRACING_V2` | | `false` | Enable LangSmith tracing |
 | `LANGCHAIN_API_KEY` | | — | LangSmith API key |
 | `LOG_LEVEL` | | `INFO` | structlog level |
@@ -155,20 +154,6 @@ Returns `{"status": "ok", "version": "<git sha>"}`.
 ### GET /readyz
 
 Verifies DB reachability. Used by Render health checks.
-
----
-
-## MCP integration points
-
-When MCP tools are ready, exactly **3 files change**:
-
-1. **`orchestrator/tools/registry.py`** — add the `if settings.use_mcp_tools:` branch that imports from `orchestrator/tools/mcp/`
-2. **`orchestrator/tools/mcp/__init__.py`** — new file
-3. **`orchestrator/tools/mcp/<tool>.py`** — one file per tool implementing the same protocol
-
-Zero node changes are required. Nodes only reference `runtime.search_tool`, `runtime.doctrine_tool`, and `runtime.publish_tool` through the abstract protocols defined in `orchestrator/tools/protocols.py`.
-
-Toggle with `USE_MCP_TOOLS=true`.
 
 ---
 

@@ -1,0 +1,552 @@
+PROJECT: video-agent
+A multi-tenant video clip recommendation FastAPI service using LangGraph,
+Supabase/Postgres, OpenAI, Backblaze B2, and OpusClip.
+
+Users chat with the agent. The graph classifies intent, retrieves transcript
+segments, optionally downloads the full source transcript from B2, asks an LLM
+to choose a clip, critiques the choice against a brand rubric, formats a
+recommendation, pauses for user approval, then publishes through OpusClip or a
+stub publisher depending on configuration.
+
+================================================================================
+ENTRY POINTS
+================================================================================
+
+orchestrator/main.py
+  FastAPI app. Defines HTTP endpoints and SSE streaming.
+  Endpoints:
+    POST /chat
+      Starts or continues a session. Streams LangGraph node updates as SSE.
+      Auto-creates the chat session on first message.
+    POST /confirm
+      Resumes a paused graph after the user approves or rejects the clip.
+    POST /sessions
+      Explicitly pre-creates a session. Can accept a caller-provided ID or
+      generate a UUID server-side.
+    GET /sessions
+      Lists the authenticated user's active sessions newest-first.
+    GET /sessions/{session_id}/messages
+      Returns user-visible message history from LangGraph checkpoint state.
+    POST /admin/users
+      Creates a Supabase Auth user and links the user to a tenant/client.
+      Requires the Supabase service role key as the Bearer token.
+    GET /health
+      Version/status ping.
+    GET /readyz
+      Postgres reachability probe for Render/readiness checks.
+
+  On startup:
+    - Configures structlog logging.
+    - Opens the LangGraph Postgres checkpointer.
+    - Creates a shared service-role Supabase client on app.state.svc.
+
+run.py
+  Thin wrapper for local dev:
+    uvicorn orchestrator.main:app --reload
+
+================================================================================
+CONFIGURATION
+================================================================================
+
+orchestrator/config.py
+  Pydantic-settings Settings class. Reads .env / environment variables.
+  Key fields:
+    supabase_url, supabase_anon_key, supabase_service_key, supabase_db_url
+    openai_api_key
+    langchain_tracing_v2, langchain_api_key
+    b2_key_id, b2_application_key
+    opusclip_api_key
+    opusclip_api_url (default: https://api.opus.pro/api)
+    max_critique_iterations (default: 3)
+    embedding_model (default: text-embedding-3-small)
+    llm_model (default: gpt-4o)
+    log_level (default: INFO)
+    require_brand_doctrine (default: true)
+    context_window_messages (default: 12)
+    retrieve_match_count (default: 15)
+    cors_origins (default: *)
+
+.env.example
+  Template for Supabase, OpenAI, Backblaze B2, OpusClip, LangSmith, tuning,
+  and CORS environment variables.
+
+================================================================================
+GRAPH (LANGGRAPH STATEGRAPH)
+================================================================================
+
+orchestrator/graph.py
+  Builds and compiles the LangGraph StateGraph.
+
+  Routing functions:
+    _intent_router
+      After route_intent:
+        chitchat -> chat_response
+        follow_up -> recommend
+        new_request -> fetch_doctrine when REQUIRE_BRAND_DOCTRINE=true
+        new_request -> retrieve when REQUIRE_BRAND_DOCTRINE=false
+
+    _retrieve_router
+      After retrieve:
+        forced approved critique -> recommend
+        normal retrieval -> fetch_source
+
+    _critique_router
+      After critique:
+        approved -> recommend
+        needs_refinement -> refine
+        retry -> retrieve
+
+  Node flow:
+    START
+      -> route_intent
+           -> chat_response -> END
+           -> recommend -> [INTERRUPT before post_stub] -> post_stub -> END
+           -> fetch_doctrine -> retrieve
+           -> retrieve -> fetch_source -> analyze -> critique
+                -> recommend -> [INTERRUPT before post_stub] -> post_stub -> END
+                -> refine -> retrieve
+                -> retrieve
+
+  The graph is compiled with interrupt_before=["post_stub"], so the app pauses
+  after a recommendation and waits for POST /confirm.
+
+================================================================================
+STATE
+================================================================================
+
+orchestrator/state.py
+  AgentState TypedDict passed through graph nodes.
+  Fields:
+    messages
+      LangGraph message list using add_messages reducer.
+    session_id
+      LangGraph thread/session ID.
+    intent
+      "new_request" | "follow_up" | "chitchat" | None.
+    user_query
+      Query extracted by route_intent.
+    refined_query
+      Query rewrite from refine.
+    iteration_count
+      Number of critique/refine loops.
+    previous_segment_ids
+      Top segment IDs from the last retrieve, used for staleness detection.
+    retrieved_segments
+      Transcript chunks returned by Supabase search.
+    brand_doctrine
+      Tenant rubric dict loaded from Supabase or defaulted when allowed.
+    source_file_content
+      Full source transcript text downloaded from Backblaze B2, if available.
+    candidate_recommendation
+      LLM-selected clip candidate.
+    critique_result
+      Scored verdict from critique.
+    final_recommendation
+      User-facing markdown recommendation.
+    awaiting_confirmation
+      True while paused before post_stub.
+    confirmation_response
+      "approved" | "rejected" | None.
+
+================================================================================
+RUNTIME CONTEXT
+================================================================================
+
+orchestrator/runtime.py
+  RuntimeContext dataclass. Per-request only; never stored in graph state.
+  Injected through config["configurable"]["runtime"].
+  Fields:
+    client_id
+    user_id
+    search_tool
+    doctrine_tool
+    publish_tool
+    file_tool
+    llm
+    embedder
+
+================================================================================
+AUTH
+================================================================================
+
+orchestrator/auth.py
+  extract_bearer(request) -> str
+    Reads and validates the Authorization: Bearer token header.
+
+  verify_token(token) -> UUID
+    Validates the Supabase Auth JWT through /auth/v1/user.
+
+  get_client_id(user_id, svc) -> UUID
+    Looks up the user's client_id from user_profiles.
+
+  resolve_runtime(request, svc) -> RuntimeContext
+    Authenticates the request, creates a service-role Supabase client for tools,
+    constructs the tool registry, ChatOpenAI client, and OpenAI embedder.
+
+  admin_create_auth_user(email, password) -> UUID
+    Calls the Supabase Auth Admin API with the service role key.
+
+================================================================================
+NODES
+================================================================================
+
+orchestrator/nodes/route_intent.py
+  Uses route_intent.md and the recent message window to classify intent and
+  extract user_query. On new_request, resets pipeline fields.
+
+orchestrator/nodes/chat_response.py
+  Direct conversational response path. Uses the LLM and appends an AIMessage.
+
+orchestrator/nodes/fetch_doctrine.py
+  Loads the active tenant doctrine through runtime.doctrine_tool.
+
+orchestrator/nodes/retrieve.py
+  Embeds the active query, calls runtime.search_tool.search_transcripts(), and
+  stores retrieved segments. Handles optional default doctrine when brand
+  doctrine is not required. Force-approves when the critique/refine iteration
+  cap is reached or retrieval results become stale.
+
+orchestrator/nodes/fetch_source.py
+  Uses the top retrieved segment's video_id to call
+  runtime.file_tool.fetch_source_file(). Stores source_file_content. Raises a
+  RetrievalError if the B2 download attempt fails unexpectedly.
+
+orchestrator/nodes/analyze.py
+  Sends user_query, retrieved segments, brand doctrine, and source_file_content
+  when present to analyze.md. Parses the LLM JSON candidate, embeds the hook
+  quote, and calls runtime.search_tool.match_assets() for B-roll/music/overlay
+  suggestions.
+
+orchestrator/nodes/critique.py
+  Scores the candidate against the rubric with critique.md. Normalizes rubric
+  weights, handles timestamp-dependent dimensions, computes weighted_score,
+  and emits approved / needs_refinement / retry.
+
+orchestrator/nodes/refine.py
+  Rewrites the query with refine.md to search for different candidates.
+
+orchestrator/nodes/recommend.py
+  Formats the final user-facing recommendation with recommend.md, appends it
+  to messages, and sets awaiting_confirmation=True.
+
+orchestrator/nodes/post_stub.py
+  Despite the filename, this now calls runtime.publish_tool. If the user rejects,
+  it appends a decline message. If approved, it builds a ClipPayload and calls
+  create_and_post_clip(), which may be either OpusClipTool or OpusClipStub.
+
+================================================================================
+TOOLS AND PROTOCOLS
+================================================================================
+
+orchestrator/tools/protocols.py
+  Protocol interfaces:
+    SearchTool
+      search_transcripts(), match_assets()
+    DoctrineTool
+      get_active_doctrine()
+    PublishTool
+      create_and_post_clip()
+    Embedder
+      embed()
+    FileTool
+      fetch_source_file(), list_buckets(), list_file_names(),
+      list_file_versions(), list_keys(), find_file_by_name()
+
+  Data classes:
+    TranscriptHit, AssetHit, Doctrine, ClipPayload, PublishResult
+    B2Bucket, B2FileEntry, B2KeyInfo
+    OpusProject, OpusClip, OpusBrandTemplate, OpusCollection,
+    OpusSocialAccount, OpusJob, OpusUploadLink
+
+orchestrator/tools/registry.py
+  get_tools(supabase, client_id) -> ToolSet.
+  Builds:
+    search -> SupabaseSearchTool
+    doctrine -> SupabaseDoctrineTool
+    file -> B2FileTool
+    publish -> OpusClipTool when OPUSCLIP_API_KEY is configured,
+               otherwise OpusClipStub
+
+orchestrator/tools/local/supabase_search.py
+  SupabaseSearchTool.
+  Calls RPC functions:
+    hybrid_search_transcripts(query_text, query_embedding, match_count, min_seconds)
+    match_assets(query_embedding, asset_types, match_count)
+
+orchestrator/tools/local/doctrine.py
+  SupabaseDoctrineTool. Reads the active brand_doctrine row for the tenant.
+
+orchestrator/tools/local/b2_file.py
+  B2FileTool. Backblaze B2 client for source transcript download and file lookup.
+  Capabilities:
+    - Authorizes with b2_authorize_account and caches auth for the request.
+    - Reads b2_bucket and b2_prefix from clients_registry.
+    - Lists buckets, file names, file versions, and application keys.
+    - Finds a file by basename under the client's prefix.
+    - fetch_source_file(source_video_id):
+        1. Reads b2_path and source_file from video_summaries.
+        2. Resolves bucket/prefix from clients_registry.
+        3. Uses b2_path when present, or searches by source_file as fallback.
+        4. Downloads from the B2 downloadUrl and returns response text.
+
+orchestrator/tools/local/opusclip.py
+  OpusClipTool. Async typed client for the OpusClip REST API and the production
+  PublishTool implementation.
+  Surface includes:
+    - create_project()
+    - share_project()
+    - list_clips(), describe_clip()
+    - list_brand_templates()
+    - request_upload_link(), upload_local_file()
+    - list_collections(), create_collection(), delete_collection(),
+      export_collection(), add/remove clip from collection
+    - create/get censor job
+    - list social accounts
+    - create/get social copy job
+    - publish_post(), schedule_post(), cancel_scheduled_post()
+    - create_and_post_clip() bridge from ClipPayload to OpusClip project creation
+
+orchestrator/tools/local/opusclip_stub.py
+  Stub PublishTool used when OPUSCLIP_API_KEY is not configured.
+
+================================================================================
+PROMPTS
+================================================================================
+
+orchestrator/prompts/route_intent.md
+  Classifies the user message and extracts user_query.
+
+orchestrator/prompts/analyze.md
+  Chooses the best clip from retrieved segments. Can use source_file_content for
+  more precise quotes and timestamps.
+
+orchestrator/prompts/critique.md
+  Scores the candidate against rubric dimensions and returns JSON.
+
+orchestrator/prompts/refine.md
+  Rewrites the search query after critique.
+
+orchestrator/prompts/recommend.md
+  Formats the final markdown recommendation.
+
+orchestrator/prompts/__init__.py
+  load_prompt(filename) reads prompt markdown files.
+
+================================================================================
+DATABASE
+================================================================================
+
+databaseschema.sql
+  Supabase/Postgres schema, intended to be safe to re-run with IF NOT EXISTS
+  patterns where applicable.
+
+Key tables:
+  clients_registry
+    Tenant directory. Holds B2 bucket/prefix and client metadata.
+  user_profiles
+    Links Supabase Auth users to one client/tenant.
+  video_summaries
+    One source-video row. Holds source metadata, summary, embeddings, b2_path,
+    and source_file.
+  transcript_segments
+    Chunked transcript text with vector embeddings and timestamps.
+  brand_doctrine
+    Versioned per-tenant scoring rubric.
+  asset_catalog
+    Reusable creative assets for B-roll/music/overlay matching.
+  chat_sessions
+    Session directory; session_id matches the LangGraph thread_id.
+  checkpoints / checkpoint_blobs / checkpoint_writes
+    LangGraph checkpoint persistence tables.
+
+Key RPC functions:
+  hybrid_search_transcripts
+    Reciprocal Rank Fusion over semantic and lexical search on transcript chunks.
+  hybrid_search_summaries
+    Semantic/lexical search over video summaries.
+  match_assets
+    Vector similarity over asset_catalog.
+  admin_provision_client
+    Creates a client and seeds default doctrine.
+  admin_link_user_to_client
+    Links an auth user to a tenant.
+  increment_session_count
+    Atomically bumps chat_sessions.message_count.
+
+RLS:
+  Tenant tables are scoped by current_client_id() from JWT claims.
+
+================================================================================
+SUPPORTING MODULES
+================================================================================
+
+orchestrator/checkpointer.py
+  get_checkpointer() async context manager returning AsyncPostgresSaver.
+
+orchestrator/session_manager.py
+  get_or_create_session(), create_session(), list_sessions(), touch_session().
+
+orchestrator/context.py
+  build_context_window(messages, n) returns the last N messages for LLM calls.
+
+orchestrator/observability.py
+  configure_logging() and bind_request_context().
+
+orchestrator/errors.py
+  AgentError, AuthError, LLMError, RetrievalError, ToolError.
+
+orchestrator/sse_sanitize.py
+  compact_partial_state() removes large fields before SSE emission.
+
+orchestrator/supabase_json.py
+  as_dict() and as_dict_list() normalize Supabase response data.
+
+orchestrator/doctrine_defaults.py
+  default_brand_doctrine_dict() fallback when REQUIRE_BRAND_DOCTRINE=false.
+
+orchestrator/eventloop.py
+  Async event loop utilities used by run.py.
+
+================================================================================
+INFRASTRUCTURE
+================================================================================
+
+Dockerfile
+  Python 3.12 container. Installs requirements.txt and runs uvicorn.
+
+render.yaml
+  Render service definition with /readyz health check.
+
+.github/workflows/ci.yml
+  CI workflow for ruff, mypy, and pytest.
+
+pyproject.toml
+  Project metadata plus ruff, mypy, and pytest configuration.
+  Python target: 3.12.
+
+requirements.txt
+  Runtime dependencies: FastAPI, uvicorn, LangGraph, LangChain/OpenAI,
+  Supabase, pydantic-settings, structlog, SSE, psycopg.
+
+requirements-dev.txt
+  Dev/test dependencies: pytest, pytest-asyncio, pytest-mock, ruff, mypy.
+
+================================================================================
+TESTS
+================================================================================
+
+tests/conftest.py
+  Shared fixtures for mock runtime, tools, LLMs, embedder, B2 file tool, and
+  sample transcript hits.
+
+tests/test_graph_smoke.py
+  End-to-end graph smoke tests with mocked tools.
+
+tests/test_doctrine_parse.py
+  Brand doctrine parsing and rubric normalization tests.
+
+tests/test_state.py
+  AgentState field validation.
+
+tests/test_sse_sanitize.py
+  SSE payload compaction tests.
+
+tests/test_tools_protocols.py
+  Protocol structural conformance checks.
+
+tests/fixtures/sample_segments.json
+  Sample TranscriptHit data used by tests.
+
+================================================================================
+VENDORED / REFERENCE MATERIAL
+================================================================================
+
+opus-skills-main/
+  Local copy of an OpusClip skill/reference package.
+  Not part of the application runtime, but useful as API reference material.
+  Notable files:
+    opus-skills-main/README.md
+    opus-skills-main/CHANGELOG.md
+    opus-skills-main/skills/opusclip/SKILL.md
+    opus-skills-main/skills/opusclip/openclaw.plugin.json
+    opus-skills-main/skills/opusclip/scripts/opusclip
+    opus-skills-main/skills/opusclip/references/api-reference.md
+    opus-skills-main/skills/opusclip/references/editing-script.md
+    opus-skills-main/skills/opusclip/templates/preview.html
+
+================================================================================
+CURRENT REPOSITORY FILE MAP
+================================================================================
+
+Root:
+  .env.example
+  Dockerfile
+  LICENSE
+  README.md
+  databaseschema.sql
+  file_info.txt
+  pyproject.toml
+  render.yaml
+  requirements-dev.txt
+  requirements.txt
+  run.py
+
+Application package:
+  orchestrator/__init__.py
+  orchestrator/auth.py
+  orchestrator/checkpointer.py
+  orchestrator/config.py
+  orchestrator/context.py
+  orchestrator/doctrine_defaults.py
+  orchestrator/errors.py
+  orchestrator/eventloop.py
+  orchestrator/graph.py
+  orchestrator/main.py
+  orchestrator/observability.py
+  orchestrator/runtime.py
+  orchestrator/session_manager.py
+  orchestrator/sse_sanitize.py
+  orchestrator/state.py
+  orchestrator/supabase_json.py
+
+Graph nodes:
+  orchestrator/nodes/__init__.py
+  orchestrator/nodes/analyze.py
+  orchestrator/nodes/chat_response.py
+  orchestrator/nodes/critique.py
+  orchestrator/nodes/fetch_doctrine.py
+  orchestrator/nodes/fetch_source.py
+  orchestrator/nodes/post_stub.py
+  orchestrator/nodes/recommend.py
+  orchestrator/nodes/refine.py
+  orchestrator/nodes/retrieve.py
+  orchestrator/nodes/route_intent.py
+
+Prompts:
+  orchestrator/prompts/__init__.py
+  orchestrator/prompts/analyze.md
+  orchestrator/prompts/critique.md
+  orchestrator/prompts/recommend.md
+  orchestrator/prompts/refine.md
+  orchestrator/prompts/route_intent.md
+
+Tools:
+  orchestrator/tools/__init__.py
+  orchestrator/tools/protocols.py
+  orchestrator/tools/registry.py
+  orchestrator/tools/local/__init__.py
+  orchestrator/tools/local/b2_file.py
+  orchestrator/tools/local/doctrine.py
+  orchestrator/tools/local/opusclip.py
+  orchestrator/tools/local/opusclip_stub.py
+  orchestrator/tools/local/supabase_search.py
+
+Tests:
+  tests/__init__.py
+  tests/conftest.py
+  tests/test_doctrine_parse.py
+  tests/test_graph_smoke.py
+  tests/test_sse_sanitize.py
+  tests/test_state.py
+  tests/test_tools_protocols.py
+  tests/fixtures/sample_segments.json

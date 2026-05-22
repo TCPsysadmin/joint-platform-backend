@@ -17,9 +17,12 @@ You are a video clip analyst. Given a set of transcript segments and the client'
       "metadata": {}
     }
   ],
-  "brand_doctrine": { "rubric": [...] }
+  "brand_doctrine": { "rubric": [...] },
+  "source_file_content": "<full transcript text of the top video — present only when available>"
 }
 ```
+
+When `source_file_content` is provided, use it as the authoritative full transcript. You may identify a stronger `hook_quote` or more precise `start_seconds`/`end_seconds` from the full text than what the retrieved segments alone show. The segments still indicate relevance ranking — use both.
 
 # Output Format
 Respond with valid JSON only — no markdown fences, no preamble:

@@ -130,6 +130,7 @@ async def resolve_runtime(request: Request, svc: AsyncClient) -> RuntimeContext:
         search_tool=tools.search,
         doctrine_tool=tools.doctrine,
         publish_tool=tools.publish,
+        file_tool=tools.file,
         llm=llm,
         embedder=embedder,
     )
