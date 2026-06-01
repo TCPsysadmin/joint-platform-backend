@@ -110,6 +110,7 @@ def mock_embedder() -> AsyncMock:
 def mock_file_tool() -> AsyncMock:
     tool = AsyncMock()
     tool.fetch_source_file = AsyncMock(return_value=None)
+    tool.get_download_url = AsyncMock(return_value=None)
     tool.list_buckets = AsyncMock(return_value=[])
     tool.list_file_names = AsyncMock(return_value=([], None))
     tool.list_file_versions = AsyncMock(return_value=([], None, None))

@@ -7,7 +7,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
-from orchestrator.errors import LLMError
+from orchestrator.llm_json import parse_llm_json
 from orchestrator.prompts import load_prompt
 from orchestrator.runtime import RuntimeContext
 from orchestrator.state import AgentState
@@ -49,12 +49,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     ]
 
     response = await runtime.llm.ainvoke(messages)
-    raw = str(response.content).strip()
-
-    try:
-        result: dict[str, Any] = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"critique returned non-JSON: {raw!r}") from exc
+    result: dict[str, Any] = parse_llm_json(str(response.content), source="critique")
 
     weighted_score: float = float(result.get("weighted_score", 0.0))
     min_a_tier: float = float(doctrine.get("minimum_a_tier_score", 0.75))

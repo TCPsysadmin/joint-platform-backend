@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     opusclip_api_key: str = ""
     opusclip_api_url: str = "https://api.opus.pro/api"
+    # TTL for the signed B2 download URL handed to OpusClip so it can fetch the
+    # source video directly. Must outlast OpusClip's download/queue window.
+    # Max 604800 (B2's 7-day cap). Default 24h.
+    b2_download_url_ttl_seconds: int = 86400
 
     max_critique_iterations: int = 3
     embedding_model: str = "text-embedding-3-small"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import posixpath
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -348,7 +349,13 @@ class B2FileTool:
     # Download — primary entry point used by fetch_source node
     # ------------------------------------------------------------------
 
-    async def fetch_source_file(self, source_video_id: str) -> str | None:
+    async def _resolve_source_path(self, source_video_id: str) -> tuple[str, str] | None:
+        """Resolve a source_video_id to its (bucket_name, full_path) in B2.
+
+        Looks up b2_path/source_file from video_summaries, joins the client's
+        configured bucket + prefix, and falls back to a basename search when
+        only source_file is known. Returns None if nothing resolves.
+        """
         # 1. Look up b2_path + source_file from video_summaries.
         vs_resp = (
             await self._supabase.table("video_summaries")
@@ -372,7 +379,7 @@ class B2FileTool:
         bucket = storage["bucket"]
         prefix = storage.get("prefix") or ""
 
-        # 3. Decide the full path to download.
+        # 3. Decide the full path.
         full_path: str | None = None
         if b2_path:
             # b2_path in the DB is relative to b2_prefix.
@@ -402,7 +409,15 @@ class B2FileTool:
             )
             return None
 
-        # 4. Authorize and download.
+        return bucket, full_path
+
+    async def fetch_source_file(self, source_video_id: str) -> str | None:
+        resolved = await self._resolve_source_path(source_video_id)
+        if resolved is None:
+            return None
+        bucket, full_path = resolved
+
+        # Authorize and download.
         auth = await self._authorize()
         url = f"{auth['downloadUrl']}/file/{bucket}/{full_path}"
 
@@ -418,9 +433,65 @@ class B2FileTool:
             source_video_id=source_video_id,
             path=full_path,
             bytes=len(resp.content),
-            via_search=not bool(b2_path),
         )
         return resp.text
+
+    # ------------------------------------------------------------------
+    # Signed download URL — lets a third party (e.g. OpusClip) fetch a
+    # private file directly without proxying the bytes through us.
+    # ------------------------------------------------------------------
+
+    async def get_download_url(
+        self, source_video_id: str, *, valid_duration_seconds: int = 86400
+    ) -> str | None:
+        """Build a time-limited, self-contained download URL for a source video.
+
+        Calls b2_get_download_authorization to mint a token scoped to the exact
+        file path, then returns a URL with the token embedded as the
+        ``Authorization`` query parameter. The URL needs no extra headers, so an
+        external service can fetch the private file directly from B2.
+
+        `valid_duration_seconds` must be in [1, 604800] (B2's 7-day cap).
+        Returns None if the source_video_id can't be resolved to a file.
+        """
+        resolved = await self._resolve_source_path(source_video_id)
+        if resolved is None:
+            return None
+        bucket_name, full_path = resolved
+
+        bucket_id = await self._resolve_bucket_id(bucket_name)
+        if not bucket_id:
+            logger.warning(
+                "b2_signed_url_no_bucket_id",
+                source_video_id=source_video_id,
+                bucket=bucket_name,
+            )
+            return None
+
+        auth = await self._authorize()
+        url = f"{auth['apiUrl']}/b2api/v3/b2_get_download_authorization"
+        body = {
+            "bucketId": bucket_id,
+            "fileNamePrefix": full_path,
+            "validDurationInSeconds": valid_duration_seconds,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            resp = await http.post(url, json=body, headers=await self._headers())
+            resp.raise_for_status()
+            token = str(resp.json()["authorizationToken"])
+
+        encoded_path = quote(full_path, safe="/")
+        signed_url = (
+            f"{auth['downloadUrl']}/file/{bucket_name}/{encoded_path}"
+            f"?Authorization={quote(token, safe='')}"
+        )
+        logger.info(
+            "b2_signed_url_created",
+            source_video_id=source_video_id,
+            path=full_path,
+            ttl=valid_duration_seconds,
+        )
+        return signed_url
 
 
 def _parse_file_entry(row: dict[str, Any]) -> B2FileEntry:

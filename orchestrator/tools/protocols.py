@@ -204,6 +204,10 @@ class Embedder(Protocol):
 class FileTool(Protocol):
     async def fetch_source_file(self, source_video_id: str) -> str | None: ...
 
+    async def get_download_url(
+        self, source_video_id: str, *, valid_duration_seconds: int = 86400
+    ) -> str | None: ...
+
     async def list_buckets(
         self,
         *,

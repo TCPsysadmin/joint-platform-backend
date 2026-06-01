@@ -792,11 +792,14 @@ grant execute on function public.match_assets(vector, text[], integer)
 -- Single-call client provisioning. Creates the clients_registry row and
 -- seeds a default brand_doctrine. Call from the Supabase SQL Editor or the
 -- backend admin flow.
+drop function if exists public.admin_provision_client(text, text, text, text);
 create or replace function public.admin_provision_client(
-    p_slug         text,
+    p_slug text,
     p_display_name text,
-    p_source_kind  text default 'gdrive',
-    p_plan_tier    text default 'standard'
+    p_source_kind text default 'gdrive',
+    p_b2_bucket text default null,
+    p_b2_prefix text default null,
+    p_plan_tier text default 'standard'
 )
 returns uuid
 language plpgsql
@@ -806,8 +809,22 @@ as $$
 declare
     v_client_id uuid;
 begin
-    insert into public.clients_registry (slug, display_name, source_kind, plan_tier)
-    values (p_slug, p_display_name, p_source_kind, p_plan_tier)
+    insert into public.clients_registry (
+        slug,
+        display_name,
+        source_kind,
+        b2_bucket,
+        b2_prefix,
+        plan_tier
+    )
+    values (
+        p_slug,
+        p_display_name,
+        p_source_kind,
+        p_b2_bucket,
+        coalesce(p_b2_prefix, ''),
+        p_plan_tier
+    )
     returning client_id into v_client_id;
 
     insert into public.brand_doctrine (client_id, version, name, description, rubric)
@@ -831,7 +848,7 @@ begin
 end;
 $$;
 
-revoke execute on function public.admin_provision_client(text, text, text, text)
+revoke execute on function public.admin_provision_client(text, text, text, text, text, text)
     from public, anon, authenticated;
 
 

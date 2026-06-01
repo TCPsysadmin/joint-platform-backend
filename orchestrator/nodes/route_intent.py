@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import structlog
@@ -10,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from orchestrator.config import settings
 from orchestrator.context import build_context_window
 from orchestrator.errors import LLMError
+from orchestrator.llm_json import parse_llm_json
 from orchestrator.prompts import load_prompt
 from orchestrator.runtime import RuntimeContext
 from orchestrator.state import AgentState
@@ -25,12 +25,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     messages = [SystemMessage(content=prompt), *windowed]
 
     response = await runtime.llm.ainvoke(messages)
-    raw = str(response.content).strip()
-
-    try:
-        data: dict[str, Any] = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"route_intent returned non-JSON: {raw!r}") from exc
+    data: dict[str, Any] = parse_llm_json(str(response.content), source="route_intent")
 
     intent = data.get("intent")
     if intent not in ("new_request", "follow_up", "chitchat"):

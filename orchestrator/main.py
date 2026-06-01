@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import uuid
@@ -98,6 +99,15 @@ class AdminCreateUserRequest(BaseModel):
     display_name: str | None = None
 
 
+class AdminProvisionClientRequest(BaseModel):
+    slug: str
+    display_name: str
+    source_kind: str = "gdrive"
+    plan_tier: str = "standard"
+    b2_bucket: str | None = None
+    b2_prefix: str | None = None
+
+
 # ── Exception handlers ─────────────────────────────────────────────────────────
 
 
@@ -115,8 +125,21 @@ async def agent_error_handler(_: Request, exc: AgentError) -> JSONResponse:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
+def _json_default(obj: Any) -> str:
+    """Fallback encoder for types json.dumps can't handle natively.
+
+    Node updates can carry UUIDs (and datetimes) nested inside dicts/lists that
+    survive compact_partial_state's top-level type filter.
+    """
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 def _sse(event: str, data: dict[str, Any]) -> dict[str, str]:
-    return {"event": event, "data": json.dumps(data)}
+    return {"event": event, "data": json.dumps(data, default=_json_default)}
 
 
 def _thread_config(session_id: str, runtime: RuntimeContext | None = None) -> RunnableConfig:
@@ -149,6 +172,17 @@ def _require_admin(request: Request) -> None:
     expected = f"Bearer {settings.supabase_service_key}"
     if auth != expected:
         raise HTTPException(status_code=403, detail="Forbidden: admin key required")
+
+
+async def _client_exists(svc: AsyncClient, client_id: uuid.UUID) -> bool:
+    response = (
+        await svc.table("clients_registry")
+        .select("client_id")
+        .eq("client_id", str(client_id))
+        .maybe_single()
+        .execute()
+    )
+    return response is not None and response.data is not None
 
 
 # ── Chat endpoints ─────────────────────────────────────────────────────────────
@@ -338,6 +372,47 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
 # ── Admin endpoints ────────────────────────────────────────────────────────────
 
 
+@app.post("/admin/clients", status_code=201)
+async def admin_provision_client(
+    request: Request,
+    body: AdminProvisionClientRequest,
+) -> dict[str, Any]:
+    """Provision a tenant and seed its default doctrine.
+
+    Requires the service role key as Bearer token (Authorization header).
+    """
+    _require_admin(request)
+
+    svc: AsyncClient = request.app.state.svc
+    response = await svc.rpc(
+        "admin_provision_client",
+        {
+            "p_slug": body.slug,
+            "p_display_name": body.display_name,
+            "p_source_kind": body.source_kind,
+            "p_b2_bucket": body.b2_bucket,
+            "p_b2_prefix": body.b2_prefix,
+            "p_plan_tier": body.plan_tier,
+        },
+    ).execute()
+
+    client_id = str(response.data)
+    logger.info(
+        "admin_client_provisioned",
+        client_id=client_id,
+        slug=body.slug,
+    )
+    return {
+        "client_id": client_id,
+        "slug": body.slug,
+        "display_name": body.display_name,
+        "source_kind": body.source_kind,
+        "b2_bucket": body.b2_bucket,
+        "b2_prefix": body.b2_prefix,
+        "plan_tier": body.plan_tier,
+    }
+
+
 @app.post("/admin/users", status_code=201)
 async def admin_create_user(request: Request, body: AdminCreateUserRequest) -> dict[str, Any]:
     """Create a Supabase Auth user and link them to a client.
@@ -361,6 +436,15 @@ async def admin_create_user(request: Request, body: AdminCreateUserRequest) -> d
         raise HTTPException(status_code=422, detail="client_id must be a valid UUID") from None
 
     svc: AsyncClient = request.app.state.svc
+
+    if not await _client_exists(svc, client_uuid):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "client_id was not found in clients_registry. "
+                "Provision the client first with POST /admin/clients."
+            ),
+        )
 
     # 1. Create auth user.
     try:
