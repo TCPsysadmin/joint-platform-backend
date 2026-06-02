@@ -31,14 +31,25 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     if intent not in ("new_request", "follow_up", "chitchat"):
         raise LLMError(f"route_intent returned unknown intent: {intent!r}")
 
-    logger.info("intent_routed", intent=intent, session_id=state.get("session_id"))
+    # The model decides — in this same call — whether a follow-up can reuse the
+    # existing chunks/transcript or needs a fresh retrieval. Cheap: no extra LLM call.
+    reuse_context = bool(data.get("reuse_context", False)) if intent == "follow_up" else False
+
+    logger.info(
+        "intent_routed",
+        intent=intent,
+        reuse_context=reuse_context,
+        session_id=state.get("session_id"),
+    )
 
     base: dict[str, Any] = {
         "intent": intent,
+        "follow_up_reuse": reuse_context,
         "user_query": data.get("user_query"),
     }
 
     if intent == "new_request":
+        # A brand-new request wipes all prior pipeline state.
         base.update(
             {
                 "refined_query": None,
@@ -47,6 +58,39 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "retrieved_segments": [],
                 "brand_doctrine": None,
                 "source_file_content": None,
+                "candidate_recommendation": None,
+                "critique_result": None,
+                "final_recommendation": None,
+                "awaiting_confirmation": False,
+                "confirmation_response": None,
+            }
+        )
+    elif intent == "follow_up" and not reuse_context:
+        # Fresh retrieval for the follow-up: reset the retrieval/critique loop so
+        # staleness and iteration-cap checks don't misfire on the new query.
+        # Brand doctrine is preserved — it doesn't change within a session.
+        base.update(
+            {
+                "refined_query": None,
+                "iteration_count": 0,
+                "previous_segment_ids": [],
+                "retrieved_segments": [],
+                "source_file_content": None,
+                "candidate_recommendation": None,
+                "critique_result": None,
+                "final_recommendation": None,
+                "awaiting_confirmation": False,
+                "confirmation_response": None,
+            }
+        )
+    elif intent == "follow_up" and reuse_context:
+        # Reuse existing chunks + transcript, but re-reason from scratch against the
+        # new instruction: clear the critique loop and force a fresh candidate.
+        # refined_query is cleared so analyze keys off the new user_query.
+        base.update(
+            {
+                "refined_query": None,
+                "iteration_count": 0,
                 "candidate_recommendation": None,
                 "critique_result": None,
                 "final_recommendation": None,

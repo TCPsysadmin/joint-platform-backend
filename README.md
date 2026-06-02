@@ -43,19 +43,39 @@ graph TD
 ```
 START
   → route_intent
-       ├── chitchat    → chat_response → END
-       ├── follow_up   → recommend ──────────────────────────────┐
-       └── new_request → fetch_doctrine → retrieve               │
-                                             ↓                    │
-                                           analyze                │
-                                             ↓                    │
-                                          critique                │
+       ├── chitchat                  → chat_response → END
+       ├── follow_up (reuse_context) → analyze ───────────────────┐  (reuses existing chunks + transcript)
+       ├── follow_up (fresh)         → fetch_doctrine → retrieve   │  (re-retrieves with the new instruction)
+       └── new_request               → fetch_doctrine → retrieve   │
+                                             ↓                      │
+                                           analyze ◄────────────────┘
+                                             ↓
+                                          critique
                                      ┌─ approved ──────────────→ recommend → [interrupt] → post_stub → END
                                      ├─ needs_refinement → refine → retrieve  (loop)
                                      └─ retry             → retrieve  (loop)
 ```
 
-The graph pauses (`interrupt_before=["post_stub"]`) after `recommend` so the user can approve or reject via `POST /confirm`.
+`route_intent` decides — in the same LLM call — whether a follow-up can reuse the
+already-retrieved chunks/transcript (`reuse_context: true`, routes straight to `analyze`)
+or needs a fresh search (`reuse_context: false`, routes through `retrieve`).
+
+`analyze` returns a **ranked list of clip candidates** (`candidate_clips`, up to
+`clip_candidate_count`); the top clip is mirrored into `candidate_recommendation` for
+critique gating. `recommend` presents the whole ranked breakdown as a numbered list of
+time frames, grounded in the actual B2 transcript (`source_file_content`).
+
+The graph pauses (`interrupt_before=["post_stub"]`) after `recommend` so the creator can
+confirm. Confirmation happens two ways:
+
+- **`POST /confirm`** with `action="approved"|"rejected"` (button-based).
+- **A natural-language `/chat` message** while awaiting confirmation. A lightweight
+  classifier (`confirm_intent`) reads it as `approve` / `reject` / `other`. "approve"
+  (e.g. *"turn this into an opus project"*) resumes `post_stub`; "reject"/"other" clears
+  the gate without running `post_stub` and the message is handled as a fresh turn.
+
+On approval, `post_stub` creates an **OpusClip project from the full source video**
+(`full_file=True`) and lets Opus auto-curate clips across the whole file.
 
 ---
 

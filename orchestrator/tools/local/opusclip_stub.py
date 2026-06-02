@@ -21,6 +21,7 @@ class OpusClipStub:
             "opusclip_stub_called",
             clip_id=clip_id,
             video_id=payload.video_id,
+            full_file=payload.full_file,
             start_seconds=payload.start_seconds,
             end_seconds=payload.end_seconds,
         )

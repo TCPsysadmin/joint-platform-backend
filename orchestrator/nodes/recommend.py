@@ -19,22 +19,29 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
     prompt = load_prompt("recommend.md")
 
-    candidate = state.get("candidate_recommendation") or {}
+    clips = state.get("candidate_clips") or []
+    if not clips and state.get("candidate_recommendation"):
+        clips = [state["candidate_recommendation"]]  # type: ignore[list-item]
     critique = state.get("critique_result") or {}
     doctrine = state.get("brand_doctrine") or {}
+    transcript = state.get("source_file_content")
+    user_query = state.get("refined_query") or state.get("user_query") or ""
+
+    payload: dict[str, Any] = {
+        "user_query": user_query,
+        # Ranked clip candidates, best-first. The critique below scores the top clip.
+        "clips": clips,
+        "critique": critique,
+        "doctrine": doctrine,
+    }
+    # Ground the final recommendation in the actual transcript pulled from B2, not
+    # just the terse candidate JSON — this is what makes the answer in-depth.
+    if transcript:
+        payload["source_file_content"] = transcript
 
     messages = [
         SystemMessage(content=prompt),
-        HumanMessage(
-            content=json.dumps(
-                {
-                    "candidate": candidate,
-                    "critique": critique,
-                    "doctrine": doctrine,
-                },
-                default=str,
-            )
-        ),
+        HumanMessage(content=json.dumps(payload, default=str)),
     ]
 
     response = await runtime.llm.ainvoke(messages)

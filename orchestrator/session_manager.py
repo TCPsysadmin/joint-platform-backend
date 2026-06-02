@@ -11,9 +11,17 @@ from orchestrator.supabase_json import JsonDict, as_dict, as_dict_list
 
 logger = structlog.get_logger(__name__)
 
+# Title used when a session is pre-created (POST /sessions) with no explicit title,
+# before the first real message arrives. Treated as "not yet titled".
+_PLACEHOLDER_TITLE = "New conversation"
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _derive_title(first_message: str | None) -> str:
+    return (first_message or "").strip()[:100] or _PLACEHOLDER_TITLE
 
 
 async def get_or_create_session(
@@ -31,14 +39,14 @@ async def get_or_create_session(
     """
     response = (
         await svc.table("chat_sessions")
-        .select("user_id")
+        .select("user_id, title, message_count")
         .eq("session_id", session_id)
         .maybe_single()
         .execute()
     )
 
     if response is None or response.data is None:
-        title = (first_message or "").strip()[:100] or "New conversation"
+        title = _derive_title(first_message)
         await (
             svc.table("chat_sessions")
             .insert(
@@ -54,13 +62,31 @@ async def get_or_create_session(
             .execute()
         )
         logger.info("session_created", session_id=session_id, user_id=str(user_id))
-    else:
-        row = as_dict(response.data)
-        if row is None:
-            raise RuntimeError(f"Malformed session row for {session_id!r}")
-        existing_uid = str(row["user_id"])
-        if existing_uid != str(user_id):
-            raise AuthError(f"Session {session_id!r} belongs to a different user")
+        return
+
+    row = as_dict(response.data)
+    if row is None:
+        raise RuntimeError(f"Malformed session row for {session_id!r}")
+    existing_uid = str(row["user_id"])
+    if existing_uid != str(user_id):
+        raise AuthError(f"Session {session_id!r} belongs to a different user")
+
+    # The session was pre-created (e.g. POST /sessions) before the first message.
+    # If it's still untitled and no turns have happened, claim the title from the
+    # first message so the truncated message shows up in the sidebar.
+    new_title = _derive_title(first_message)
+    if (
+        new_title != _PLACEHOLDER_TITLE
+        and str(row.get("title") or "") in ("", _PLACEHOLDER_TITLE)
+        and int(row.get("message_count") or 0) == 0
+    ):
+        await (
+            svc.table("chat_sessions")
+            .update({"title": new_title})
+            .eq("session_id", session_id)
+            .execute()
+        )
+        logger.info("session_title_set", session_id=session_id, title=new_title)
 
 
 async def touch_session(svc: AsyncClient, session_id: str) -> None:

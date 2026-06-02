@@ -544,9 +544,13 @@ class OpusClipTool:
 
         Submits a clip-project request to OpusClip. The video URL is taken
         from `payload.metadata['video_url']` if present, otherwise falls back
-        to `payload.video_id`. The agent's chosen [start_seconds, end_seconds]
-        becomes OpusClip's curation `range`, and the clip length is used as
-        the requested clip duration.
+        to `payload.video_id`.
+
+        Two modes:
+        * ``payload.full_file`` → create a project from the entire source video and
+          let Opus auto-curate clips across the whole file (no curation range).
+        * otherwise → the agent's chosen [start_seconds, end_seconds] becomes
+          OpusClip's curation ``range`` and clip duration.
         """
         meta = payload.metadata or {}
         video_url = str(meta.get("video_url") or payload.video_id or "")
@@ -556,24 +560,35 @@ class OpusClipTool:
                 "or fallback video_id"
             )
 
-        clip_length = max(int(round(payload.end_seconds - payload.start_seconds)), 1)
-        project = await self.create_project(
-            video_url=video_url,
-            clip_durations=[clip_length],
-            range_start_sec=payload.start_seconds or None,
-            range_end_sec=payload.end_seconds or None,
-            title=str(meta.get("title") or "") or None,
-            brand_template_id=str(meta.get("brand_template_id") or "") or None,
-            model=str(meta.get("model") or "") or None,
-            custom_prompt=payload.hook_quote or None,
-            aspect_ratio=str(meta.get("aspect_ratio") or "portrait"),
-        )
+        if payload.full_file:
+            project = await self.create_project(
+                video_url=video_url,
+                clip_durations=list(payload.clip_durations) or [60],
+                title=str(meta.get("title") or "") or None,
+                brand_template_id=str(meta.get("brand_template_id") or "") or None,
+                model=str(meta.get("model") or "") or None,
+                aspect_ratio=str(meta.get("aspect_ratio") or "portrait"),
+            )
+        else:
+            clip_length = max(int(round(payload.end_seconds - payload.start_seconds)), 1)
+            project = await self.create_project(
+                video_url=video_url,
+                clip_durations=[clip_length],
+                range_start_sec=payload.start_seconds or None,
+                range_end_sec=payload.end_seconds or None,
+                title=str(meta.get("title") or "") or None,
+                brand_template_id=str(meta.get("brand_template_id") or "") or None,
+                model=str(meta.get("model") or "") or None,
+                custom_prompt=payload.hook_quote or None,
+                aspect_ratio=str(meta.get("aspect_ratio") or "portrait"),
+            )
 
         logger.info(
             "opusclip_project_created",
             project_id=project.project_id,
             video_url=video_url,
-            range=(payload.start_seconds, payload.end_seconds),
+            full_file=payload.full_file,
+            range=None if payload.full_file else (payload.start_seconds, payload.end_seconds),
         )
 
         return PublishResult(

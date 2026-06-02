@@ -28,6 +28,7 @@ from orchestrator.auth import (
 )
 from orchestrator.checkpointer import get_checkpointer
 from orchestrator.config import settings
+from orchestrator.confirm_intent import classify_confirmation_reply
 from orchestrator.errors import AgentError, AuthError
 from orchestrator.graph import build_graph
 from orchestrator.observability import bind_request_context, configure_logging
@@ -216,12 +217,57 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
 
     async def generate() -> AsyncGenerator[dict[str, str], None]:
         try:
+            # If the previous turn left the graph parked at the post_stub confirmation
+            # interrupt, interpret this message as the creator's response to it.
+            prior_state = await graph.aget_state(thread_config)
+            if prior_state.next and "post_stub" in prior_state.next:
+                decision = await classify_confirmation_reply(runtime.llm, body.message)
+                logger.info(
+                    "chat_confirmation_reply",
+                    decision=decision,
+                    session_id=body.session_id,
+                )
+                if decision == "approve":
+                    # Approve in-place: record the message, resume post_stub so the
+                    # OpusClip project is actually created, and finish this turn.
+                    await graph.aupdate_state(
+                        thread_config,
+                        {
+                            "messages": [HumanMessage(content=body.message)],
+                            "confirmation_response": "approved",
+                            "awaiting_confirmation": False,
+                        },
+                    )
+                    async for chunk in graph.astream(
+                        None, config=thread_config, stream_mode="updates"
+                    ):
+                        for node_name, node_update in chunk.items():
+                            if not isinstance(node_update, dict):
+                                continue
+                            safe_update = compact_partial_state(node_name, node_update)
+                            yield _sse(
+                                "node", {"node": node_name, "partial_state": safe_update}
+                            )
+                    await session_manager.touch_session(svc, body.session_id)
+                    yield _sse("done", {"action": "opus_project_created"})
+                    return
+
+                # reject / other → clear the gate WITHOUT running post_stub (no project
+                # created, no canned message), then handle this message as a fresh turn.
+                await graph.aupdate_state(
+                    thread_config,
+                    {"confirmation_response": "rejected", "awaiting_confirmation": False},
+                    as_node="post_stub",
+                )
+
             async for chunk in graph.astream(
                 input_state,
                 config=thread_config,
                 stream_mode="updates",
             ):
                 for node_name, node_update in chunk.items():
+                    if not isinstance(node_update, dict):
+                        continue  # LangGraph emits __interrupt__ as a tuple; skip it
                     safe_update = compact_partial_state(node_name, node_update)
                     yield _sse("node", {"node": node_name, "partial_state": safe_update})
 
@@ -239,6 +285,9 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
         except AgentError as exc:
             logger.error("chat_stream_failed", error=str(exc))
             yield _sse("error", {"detail": str(exc)})
+        except Exception:  # noqa: BLE001 — never leave the SSE stream without a terminal event
+            logger.exception("chat_stream_crashed")
+            yield _sse("error", {"detail": "Internal agent error"})
 
     return EventSourceResponse(generate())
 
@@ -268,24 +317,34 @@ async def confirm(request: Request, body: ConfirmRequest) -> EventSourceResponse
     thread_config = _thread_config(body.session_id, runtime)
 
     async def generate() -> AsyncGenerator[dict[str, str], None]:
-        await graph.aupdate_state(
-            thread_config,
-            {
-                "confirmation_response": body.action,
-                "awaiting_confirmation": False,
-            },
-        )
+        try:
+            await graph.aupdate_state(
+                thread_config,
+                {
+                    "confirmation_response": body.action,
+                    "awaiting_confirmation": False,
+                },
+            )
 
-        async for chunk in graph.astream(
-            None,
-            config=thread_config,
-            stream_mode="updates",
-        ):
-            for node_name, _ in chunk.items():
-                yield _sse("node", {"node": node_name})
+            async for chunk in graph.astream(
+                None,
+                config=thread_config,
+                stream_mode="updates",
+            ):
+                for node_name, node_update in chunk.items():
+                    if not isinstance(node_update, dict):
+                        continue
+                    yield _sse("node", {"node": node_name})
 
-        await session_manager.touch_session(svc, body.session_id)
-        yield _sse("done", {})
+            await session_manager.touch_session(svc, body.session_id)
+            yield _sse("done", {})
+
+        except AgentError as exc:
+            logger.error("confirm_stream_failed", error=str(exc))
+            yield _sse("error", {"detail": str(exc)})
+        except Exception:  # noqa: BLE001 — never leave the SSE stream without a terminal event
+            logger.exception("confirm_stream_crashed")
+            yield _sse("error", {"detail": "Internal agent error"})
 
     return EventSourceResponse(generate())
 

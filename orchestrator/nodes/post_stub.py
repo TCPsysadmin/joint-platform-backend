@@ -19,15 +19,11 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
 
     if state.get("confirmation_response") != "approved":
+        # Not approved → clear the gate silently. Any conversational acknowledgement
+        # is handled by the next turn (route_intent/chat_response), so we don't
+        # append a canned "not posted" message here.
         logger.info("post_skipped_not_approved", session_id=state.get("session_id"))
-        return {
-            "awaiting_confirmation": False,
-            "messages": [
-                AIMessage(
-                    content="Got it — clip not posted. Let me know if you'd like to try a different clip."
-                )
-            ],
-        }
+        return {"awaiting_confirmation": False}
 
     candidate: dict[str, Any] = dict(state.get("candidate_recommendation") or {})
     video_id = str(candidate.get("video_id") or "")
@@ -47,30 +43,38 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     else:
         logger.warning("post_no_signed_url", video_id=video_id, session_id=state.get("session_id"))
 
+    # Create an OpusClip project from the entire source file and let Opus curate.
     payload = ClipPayload(
         video_id=video_id,
-        start_seconds=float(candidate.get("start_seconds") or 0.0),
-        end_seconds=float(candidate.get("end_seconds") or 0.0),
+        start_seconds=0.0,
+        end_seconds=0.0,
         hook_quote=str(candidate.get("hook_quote") or ""),
         broll_suggestions=list(candidate.get("broll_suggestions") or []),
         metadata=metadata,
+        full_file=True,
+        clip_durations=[settings.opus_default_clip_seconds],
     )
 
     try:
         result = await runtime.publish_tool.create_and_post_clip(payload)
     except Exception as exc:
-        raise ToolError(f"Publishing clip failed: {exc}") from exc
+        raise ToolError(f"Creating OpusClip project failed: {exc}") from exc
 
     logger.info(
-        "clip_posted",
-        clip_id=result.clip_id,
+        "opus_project_created",
+        project_id=result.clip_id,
         status=result.status,
         session_id=state.get("session_id"),
     )
 
-    reply = f"Clip posted! **ID:** `{result.clip_id}` | **Status:** {result.status}"
+    reply = (
+        f"Created your OpusClip project from the source video. "
+        f"**Project ID:** `{result.clip_id}` | **Status:** {result.status}\n\n"
+        f"Opus is now curating clips across the full file — they'll appear in your "
+        f"OpusClip dashboard shortly."
+    )
     if result.url:
-        reply += f"\n\n[View clip]({result.url})"
+        reply += f"\n\n[Open in OpusClip]({result.url})"
 
     return {
         "awaiting_confirmation": False,

@@ -24,9 +24,12 @@ def _intent_router(state: AgentState) -> str:
     intent = state.get("intent")
     if intent == "chitchat":
         return "chitchat"
-    if intent == "follow_up":
-        return "follow_up"
-    if settings.require_brand_doctrine:
+    # A follow-up that can reuse the existing chunks/transcript skips retrieval and
+    # re-analyzes directly. Otherwise it falls through to the same retrieval path as
+    # a new request (route_intent has already reset the loop state for it).
+    if intent == "follow_up" and state.get("follow_up_reuse"):
+        return "reuse"
+    if settings.require_brand_doctrine and state.get("brand_doctrine") is None:
         return "fetch_doctrine"
     return "retrieve"
 
@@ -72,7 +75,7 @@ def build_graph(
         _intent_router,
         {
             "chitchat": "chat_response",
-            "follow_up": "recommend",
+            "reuse": "analyze",
             "fetch_doctrine": "fetch_doctrine",
             "retrieve": "retrieve",
         },

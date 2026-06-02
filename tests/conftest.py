@@ -140,17 +140,32 @@ def mock_llm_full_flow() -> AsyncMock:
     return _make_llm_mock(
         # route_intent
         '{"intent": "new_request", "user_query": "best hook moments about consistency"}',
-        # analyze
+        # analyze — returns a ranked list of clip candidates
         json.dumps(
             {
-                "video_id": "vid-abc",
-                "segment_id": "seg-001",
-                "start_seconds": 42.5,
-                "end_seconds": 53.1,
-                "has_timestamps": True,
-                "hook_quote": "The biggest mistake most creators make is they try to appeal to everyone",
-                "rationale": "Strong contrarian hook that challenges conventional wisdom.",
-                "broll_suggestions": [],
+                "clips": [
+                    {
+                        "video_id": "vid-abc",
+                        "segment_id": "seg-001",
+                        "start_seconds": 42.5,
+                        "end_seconds": 53.1,
+                        "has_timestamps": True,
+                        "hook_quote": (
+                            "The biggest mistake most creators make is they try to "
+                            "appeal to everyone"
+                        ),
+                        "rationale": "Strong contrarian hook that challenges conventional wisdom.",
+                    },
+                    {
+                        "video_id": "vid-abc",
+                        "segment_id": "seg-002",
+                        "start_seconds": 88.0,
+                        "end_seconds": 99.0,
+                        "has_timestamps": True,
+                        "hook_quote": "Consistency beats intensity every single time",
+                        "rationale": "Punchy, memorable, on-doctrine.",
+                    },
+                ]
             }
         ),
         # critique

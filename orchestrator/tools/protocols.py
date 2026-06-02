@@ -45,6 +45,11 @@ class ClipPayload:
     hook_quote: str
     broll_suggestions: list[dict[str, object]]
     metadata: dict[str, object] = field(default_factory=dict)
+    # When True, create an OpusClip project from the entire source video and let
+    # Opus auto-curate clips across the whole file (start/end_seconds are ignored).
+    full_file: bool = False
+    # Target clip length(s) in seconds for full-file curation. Empty → tool default.
+    clip_durations: list[int] = field(default_factory=list)
 
 
 @dataclass

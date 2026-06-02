@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     require_brand_doctrine: bool = True
     context_window_messages: int = 12  # sliding window: last N messages sent to LLM
     retrieve_match_count: int = 15  # hybrid_search_transcripts top-K (ranked by relevance)
+    clip_candidate_count: int = 4  # how many ranked clip candidates analyze surfaces
+    # Target clip length(s) Opus aims for when curating a full-file project (seconds).
+    opus_default_clip_seconds: int = 60
     # Comma-separated list of allowed CORS origins. Use "*" for dev/testing.
     # Set to your frontend URL(s) in production, e.g. "https://app.example.com"
     cors_origins: str = "*"
