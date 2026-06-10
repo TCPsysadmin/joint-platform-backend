@@ -428,6 +428,25 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
     }
 
 
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
+    """Archive (soft-delete) a session so it no longer appears in GET /sessions.
+
+    This is a soft delete: the session's status is flipped to 'archived' and its
+    LangGraph checkpoint history is left intact. Only the authenticated session
+    owner can archive it. Idempotent — archiving an already-archived session
+    returns the same 404 as a missing one (no active session to archive).
+    """
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+
+    archived = await session_manager.archive_session(svc, session_id, user_id)
+    if not archived:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session_id": session_id, "status": "archived"}
+
+
 # ── Admin endpoints ────────────────────────────────────────────────────────────
 
 

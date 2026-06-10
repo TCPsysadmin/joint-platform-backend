@@ -606,6 +606,36 @@ $$;
 revoke execute on function public.increment_session_count(text) from public, anon, authenticated;
 
 
+-- Soft-deletes a session by flipping its status to 'archived'. Archived sessions
+-- are excluded from list_sessions (GET /sessions), so they disappear from the
+-- sidebar while their LangGraph checkpoint history is preserved.
+-- Called by the backend via svc.rpc("archive_session", ...) on DELETE /sessions/{id}.
+-- Takes p_user_id and scopes the update to that owner so the service-role call
+-- (which bypasses RLS) still cannot archive another user's session.
+-- Returns true if a matching, still-active session was archived; false otherwise.
+create or replace function public.archive_session(p_session_id text, p_user_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_count integer;
+begin
+  update public.chat_sessions
+  set status     = 'archived',
+      updated_at = now()
+  where session_id = p_session_id
+    and user_id    = p_user_id
+    and status     = 'active';
+  get diagnostics v_count = row_count;
+  return v_count > 0;
+end;
+$$;
+
+revoke execute on function public.archive_session(text, uuid) from public, anon, authenticated;
+
+
 -- ============================================================================
 --  SEARCH FUNCTIONS
 -- ============================================================================

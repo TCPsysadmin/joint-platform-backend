@@ -112,6 +112,30 @@ async def list_sessions(svc: AsyncClient, user_id: UUID) -> list[JsonDict]:
     return as_dict_list(response.data if response else None)
 
 
+async def archive_session(svc: AsyncClient, session_id: str, user_id: UUID) -> bool:
+    """Soft-delete a session by flipping its status to 'archived'.
+
+    Archived sessions are excluded from list_sessions, so they drop out of the
+    sidebar while their LangGraph checkpoint history is preserved. Scoped to the
+    owner inside the SQL function so this service-role call cannot touch another
+    user's session.
+
+    Returns True if a still-active session was archived, False if no matching
+    active session existed (already archived, not found, or wrong owner).
+    """
+    response = await svc.rpc(
+        "archive_session",
+        {"p_session_id": session_id, "p_user_id": str(user_id)},
+    ).execute()
+    archived = bool(response.data)
+    logger.info(
+        "session_archived" if archived else "session_archive_noop",
+        session_id=session_id,
+        user_id=str(user_id),
+    )
+    return archived
+
+
 async def create_session(
     svc: AsyncClient,
     session_id: str,
