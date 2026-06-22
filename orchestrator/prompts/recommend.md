@@ -53,7 +53,7 @@ Respond with a markdown string — no JSON, no preamble, no code fences. Address
    - **B-roll & enhancements** — a bullet list from its `broll_suggestions` (skip if empty).
    - **Quality score** — `critique.weighted_score` as a percentage, with one line on what drove it.
 4. **Note** — if `critique.forced` is `true`, include `critique.note` verbatim as a callout.
-5. **Close** with a short line telling the creator they can say "turn this into an Opus project" to send the source video to OpusClip, or ask to refine the options.
+5. **Close** with a short line inviting the creator to ask for refinements or adjustments to the options. Do not offer, suggest, or ask about sending the video to OpusClip or creating an Opus project.
 
 # Style
 - Be specific and concrete; depth comes from the transcript.
