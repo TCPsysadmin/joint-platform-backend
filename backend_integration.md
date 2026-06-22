@@ -245,6 +245,7 @@ Authorization: Bearer <token>
 {
   "session_id": "…",
   "client_id": "…",
+  "turn_status": "idle",
   "message_count": 4,
   "messages": [
     { "role": "user", "content": "Find me a hook clip…" },
@@ -257,6 +258,10 @@ Authorization: Bearer <token>
   filtered out).
 - Assistant recommendations are included here, so this endpoint is the canonical
   way to render a conversation on reload.
+- `turn_status` is `"idle"`, `"running"`, or `"completed"`. If a user navigates
+  away during an active SSE stream, the backend keeps the graph turn running; on
+  return, use this value to decide whether to keep a progress state visible and
+  refresh messages again.
 
 **Errors**
 | Status | When |
@@ -350,7 +355,11 @@ creation failed), `404` (`client_id` has not been provisioned).
 ## 5. SSE streaming protocol
 
 `/chat` and `/confirm` return an **EventSourceResponse**. Each SSE message has an
-`event` name and a JSON-encoded `data` payload.
+`event` name and a JSON-encoded `data` payload. The graph run is detached from the
+HTTP stream: if the browser leaves the page and closes the SSE connection, the
+server-side turn continues and writes its final state to the session checkpoint.
+Re-posting the same in-flight body for the same session attaches to the existing
+turn; posting a different message/action while a turn is running returns `409`.
 
 ### Event types
 

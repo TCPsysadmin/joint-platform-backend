@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -20,6 +21,36 @@ _B2_AUTH_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
 # extremely large buckets. Most clients store far fewer than this.
 _FIND_FILE_PAGE_SIZE = 1000
 _FIND_FILE_MAX_PAGES = 10
+_TEXT_FILE_EXTENSIONS = {
+    ".csv",
+    ".json",
+    ".log",
+    ".md",
+    ".srt",
+    ".text",
+    ".txt",
+    ".vtt",
+}
+_TEXT_CONTENT_TYPES = {
+    "application/json",
+    "application/srt",
+    "application/vtt",
+    "text/csv",
+    "text/markdown",
+    "text/plain",
+    "text/srt",
+    "text/vtt",
+}
+_KNOWN_SOURCE_FILE_EXTENSIONS = _TEXT_FILE_EXTENSIONS | {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".m4v",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".wav",
+}
 
 
 class B2FileTool:
@@ -302,6 +333,7 @@ class B2FileTool:
         if not target:
             return None
         target_basename = posixpath.basename(target)
+        target_norm = _normalize_file_match_text(target_basename)
 
         # Resolve bucket name → bucket id.
         resolved_bucket_name = bucket_name
@@ -331,8 +363,16 @@ class B2FileTool:
             for entry in entries:
                 if entry.action != "upload":
                     continue
+                entry_basename = posixpath.basename(entry.file_name)
                 # Match either the full path or just the basename.
-                if entry.file_name == target or posixpath.basename(entry.file_name) == target_basename:
+                if (
+                    entry.file_name == target
+                    or entry_basename == target_basename
+                    or (
+                        target_norm
+                        and _normalize_file_match_text(entry_basename) == target_norm
+                    )
+                ):
                     return entry
             if not cursor:
                 break
@@ -411,13 +451,13 @@ class B2FileTool:
 
         return bucket, full_path
 
-    async def fetch_source_file(self, source_video_id: str) -> str | None:
-        resolved = await self._resolve_source_path(source_video_id)
-        if resolved is None:
-            return None
-        bucket, full_path = resolved
-
-        # Authorize and download.
+    async def _download_text_file(
+        self,
+        *,
+        bucket: str,
+        full_path: str,
+        source_label: str,
+    ) -> str | None:
         auth = await self._authorize()
         url = f"{auth['downloadUrl']}/file/{bucket}/{full_path}"
 
@@ -428,13 +468,66 @@ class B2FileTool:
             )
             resp.raise_for_status()
 
+        content_type = resp.headers.get("content-type", "").split(";", 1)[0].lower()
+        if not _is_text_file(full_path, content_type):
+            logger.info(
+                "b2_file_skipped_non_text",
+                source=source_label,
+                path=full_path,
+                content_type=content_type,
+                bytes=len(resp.content),
+            )
+            return None
+
         logger.info(
-            "b2_file_downloaded",
-            source_video_id=source_video_id,
+            "b2_text_file_downloaded",
+            source=source_label,
             path=full_path,
             bytes=len(resp.content),
         )
         return resp.text
+
+    async def fetch_source_file(self, source_video_id: str) -> str | None:
+        resolved = await self._resolve_source_path(source_video_id)
+        if resolved is None:
+            return None
+        bucket, full_path = resolved
+
+        return await self._download_text_file(
+            bucket=bucket,
+            full_path=full_path,
+            source_label=source_video_id,
+        )
+
+    async def fetch_file_by_name(
+        self,
+        *,
+        file_name: str,
+        bucket_name: str | None = None,
+        prefix: str | None = None,
+    ) -> str | None:
+        storage = await self._get_client_storage()
+        if bucket_name:
+            resolved_bucket_name = bucket_name
+        elif storage is not None:
+            resolved_bucket_name = storage["bucket"]
+        else:
+            return None
+        resolved_prefix = prefix if prefix is not None else (storage or {}).get("prefix", "")
+
+        entry = await self.find_file_by_name(
+            file_name=file_name,
+            bucket_name=resolved_bucket_name,
+            prefix=resolved_prefix,
+        )
+        if entry is None:
+            return None
+
+        return await self._download_text_file(
+            bucket=resolved_bucket_name,
+            full_path=entry.file_name,
+            source_label=file_name,
+        )
 
     # ------------------------------------------------------------------
     # Signed download URL — lets a third party (e.g. OpusClip) fetch a
@@ -514,3 +607,23 @@ def _parse_file_entry(row: dict[str, Any]) -> B2FileEntry:
             if k in row and row[k] is not None
         },
     )
+
+
+def _is_text_file(path: str, content_type: str | None) -> bool:
+    normalized_type = (content_type or "").split(";", 1)[0].lower()
+    if normalized_type.startswith("text/") or normalized_type in _TEXT_CONTENT_TYPES:
+        return True
+    extension = posixpath.splitext(path.lower())[1]
+    return extension in _TEXT_FILE_EXTENSIONS
+
+
+def _without_known_extension(value: str) -> str:
+    root, extension = posixpath.splitext(value)
+    if extension.lower() not in _KNOWN_SOURCE_FILE_EXTENSIONS:
+        return value
+    return root
+
+
+def _normalize_file_match_text(value: str) -> str:
+    stem = _without_known_extension(posixpath.basename(value.strip().strip("/"))).lower()
+    return re.sub(r"[^a-z0-9]+", " ", stem).strip()

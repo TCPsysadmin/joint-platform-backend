@@ -16,6 +16,8 @@ from orchestrator.nodes import (
     refine,
     retrieve,
     route_intent,
+    source_answer,
+    source_not_found,
 )
 from orchestrator.state import AgentState
 
@@ -36,10 +38,18 @@ def _intent_router(state: AgentState) -> str:
 
 def _retrieve_router(state: AgentState) -> str:
     """After retrieve: skip fetch_source+analyze if we've already force-approved."""
+    if state.get("source_resolution_error"):
+        return "source_not_found"
     critique_result = state.get("critique_result") or {}
     if critique_result.get("forced") and critique_result.get("verdict") == "approved":
         return "recommend"
     return "fetch_source"
+
+
+def _fetch_source_router(state: AgentState) -> str:
+    if state.get("source_task") == "source_answer":
+        return "source_answer"
+    return "analyze"
 
 
 def _critique_router(state: AgentState) -> str:
@@ -67,6 +77,8 @@ def build_graph(
     builder.add_node("refine", refine.run)
     builder.add_node("recommend", recommend.run)
     builder.add_node("post_stub", post_stub.run)
+    builder.add_node("source_answer", source_answer.run)
+    builder.add_node("source_not_found", source_not_found.run)
 
     builder.add_edge(START, "route_intent")
 
@@ -87,10 +99,20 @@ def build_graph(
     builder.add_conditional_edges(
         "retrieve",
         _retrieve_router,
-        {"fetch_source": "fetch_source", "recommend": "recommend"},
+        {
+            "fetch_source": "fetch_source",
+            "recommend": "recommend",
+            "source_not_found": "source_not_found",
+        },
     )
+    builder.add_edge("source_not_found", END)
 
-    builder.add_edge("fetch_source", "analyze")
+    builder.add_conditional_edges(
+        "fetch_source",
+        _fetch_source_router,
+        {"source_answer": "source_answer", "analyze": "analyze"},
+    )
+    builder.add_edge("source_answer", END)
     builder.add_edge("analyze", "critique")
 
     builder.add_conditional_edges(

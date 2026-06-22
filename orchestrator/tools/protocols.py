@@ -18,6 +18,15 @@ class TranscriptHit:
 
 
 @dataclass
+class SourceVideo:
+    source_video_id: str
+    title: str | None = None
+    source_file: str | None = None
+    has_timestamps: bool = True
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
 class AssetHit:
     asset_id: str
     asset_type: str
@@ -172,6 +181,14 @@ class OpusUploadLink:
 
 @runtime_checkable
 class SearchTool(Protocol):
+    async def resolve_source_video(self, source_reference: str) -> SourceVideo | None: ...
+
+    async def list_transcript_segments_for_video(
+        self,
+        *,
+        source_video_id: str,
+    ) -> list[TranscriptHit]: ...
+
     async def search_transcripts(
         self,
         *,
@@ -208,6 +225,14 @@ class Embedder(Protocol):
 @runtime_checkable
 class FileTool(Protocol):
     async def fetch_source_file(self, source_video_id: str) -> str | None: ...
+
+    async def fetch_file_by_name(
+        self,
+        *,
+        file_name: str,
+        bucket_name: str | None = None,
+        prefix: str | None = None,
+    ) -> str | None: ...
 
     async def get_download_url(
         self, source_video_id: str, *, valid_duration_seconds: int = 86400

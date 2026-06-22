@@ -14,6 +14,16 @@ class AgentState(TypedDict):
     # answer the follow-up (cheap re-analysis), False if a fresh retrieval is needed.
     follow_up_reuse: bool
     user_query: str | None
+    # Optional user-specified video/file reference. When present, retrieval is
+    # constrained to the resolved source instead of searching across all chunks.
+    source_reference: str | None
+    # Source-specific task mode. "source_answer" means answer a question about
+    # the resolved source itself instead of recommending clips from it.
+    source_task: Literal["clip_recommendation", "source_answer"] | None
+    source_video_id: str | None
+    source_metadata: dict[str, object] | None
+    source_resolution_error: str | None
+    session_documents: list[dict[str, object]]
     refined_query: str | None
     iteration_count: int
     previous_segment_ids: list[str]

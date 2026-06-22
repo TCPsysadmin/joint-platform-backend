@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from supabase import AsyncClient, create_async_client
 
-from orchestrator import session_manager
+from orchestrator import session_documents, session_manager
 from orchestrator.auth import (
     admin_create_auth_user,
     extract_bearer,
@@ -35,10 +35,17 @@ from orchestrator.observability import bind_request_context, configure_logging
 from orchestrator.runtime import RuntimeContext
 from orchestrator.sse_sanitize import compact_partial_state
 from orchestrator.supabase_json import as_dict
+from orchestrator.turn_stream import (
+    Publisher,
+    TurnAlreadyActiveError,
+    TurnStreamRegistry,
+    iter_turn_events,
+)
 
 logger = structlog.get_logger(__name__)
 
 _VERSION = os.getenv("GIT_SHA", "dev")
+_DOCUMENT_UPLOAD = File(...)
 
 
 # ── Startup / shutdown ─────────────────────────────────────────────────────────
@@ -54,8 +61,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             settings.supabase_url,
             settings.supabase_service_key,
         )
+        app.state.turn_streams = TurnStreamRegistry()
         logger.info("startup_complete", version=_VERSION)
-        yield
+        try:
+            yield
+        finally:
+            await app.state.turn_streams.cancel_all()
     logger.info("shutdown_complete")
 
 
@@ -123,6 +134,14 @@ async def agent_error_handler(_: Request, exc: AgentError) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
+@app.exception_handler(session_documents.DocumentProcessingError)
+async def document_processing_error_handler(
+    _: Request,
+    exc: session_documents.DocumentProcessingError,
+) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -186,6 +205,147 @@ async def _client_exists(svc: AsyncClient, client_id: uuid.UUID) -> bool:
     return response is not None and response.data is not None
 
 
+def _turn_streams(request: Request) -> TurnStreamRegistry:
+    registry = getattr(request.app.state, "turn_streams", None)
+    if isinstance(registry, TurnStreamRegistry):
+        return registry
+    registry = TurnStreamRegistry()
+    request.app.state.turn_streams = registry
+    return registry
+
+
+async def _run_chat_turn(
+    *,
+    session_id: str,
+    message: str,
+    svc: AsyncClient,
+    runtime: RuntimeContext,
+    checkpointer: Any,
+    documents: list[dict[str, object]],
+    publish: Publisher,
+) -> None:
+    graph = build_graph(checkpointer=checkpointer)
+    thread_config = _thread_config(session_id, runtime)
+    input_state: dict[str, Any] = {
+        "messages": [HumanMessage(content=message)],
+        "session_id": session_id,
+        "session_documents": documents,
+    }
+
+    try:
+        # If the previous turn left the graph parked at the post_stub confirmation
+        # interrupt, interpret this message as the creator's response to it.
+        prior_state = await graph.aget_state(thread_config)
+        if prior_state.next and "post_stub" in prior_state.next:
+            decision = await classify_confirmation_reply(runtime.llm, message)
+            logger.info(
+                "chat_confirmation_reply",
+                decision=decision,
+                session_id=session_id,
+            )
+            if decision == "approve":
+                # Approve in-place: record the message, resume post_stub so the
+                # OpusClip project is actually created, and finish this turn.
+                await graph.aupdate_state(
+                    thread_config,
+                    {
+                        "messages": [HumanMessage(content=message)],
+                        "confirmation_response": "approved",
+                        "awaiting_confirmation": False,
+                    },
+                )
+                async for chunk in graph.astream(None, config=thread_config, stream_mode="updates"):
+                    for node_name, node_update in chunk.items():
+                        if not isinstance(node_update, dict):
+                            continue
+                        safe_update = compact_partial_state(node_name, node_update)
+                        await publish(
+                            _sse("node", {"node": node_name, "partial_state": safe_update})
+                        )
+                await session_manager.touch_session(svc, session_id)
+                await publish(_sse("done", {"action": "opus_project_created"}))
+                return
+
+            # reject / other → clear the gate WITHOUT running post_stub (no project
+            # created, no canned message), then handle this message as a fresh turn.
+            await graph.aupdate_state(
+                thread_config,
+                {"confirmation_response": "rejected", "awaiting_confirmation": False},
+                as_node="post_stub",
+            )
+
+        async for chunk in graph.astream(
+            input_state,
+            config=thread_config,
+            stream_mode="updates",
+        ):
+            for node_name, node_update in chunk.items():
+                if not isinstance(node_update, dict):
+                    continue  # LangGraph emits __interrupt__ as a tuple; skip it
+                safe_update = compact_partial_state(node_name, node_update)
+                await publish(_sse("node", {"node": node_name, "partial_state": safe_update}))
+
+        graph_state = await graph.aget_state(thread_config)
+
+        # Bump session turn count after the graph completes.
+        await session_manager.touch_session(svc, session_id)
+
+        if graph_state.next and "post_stub" in graph_state.next:
+            final_rec = graph_state.values.get("final_recommendation")
+            await publish(_sse("awaiting_confirmation", {"recommendation": final_rec}))
+        else:
+            await publish(_sse("done", {}))
+
+    except AgentError as exc:
+        logger.error("chat_stream_failed", error=str(exc))
+        await publish(_sse("error", {"detail": str(exc)}))
+    except Exception:  # noqa: BLE001 — never leave subscribers without a terminal event
+        logger.exception("chat_stream_crashed")
+        await publish(_sse("error", {"detail": "Internal agent error"}))
+
+
+async def _run_confirm_turn(
+    *,
+    session_id: str,
+    action: str,
+    svc: AsyncClient,
+    runtime: RuntimeContext,
+    checkpointer: Any,
+    publish: Publisher,
+) -> None:
+    graph = build_graph(checkpointer=checkpointer)
+    thread_config = _thread_config(session_id, runtime)
+
+    try:
+        await graph.aupdate_state(
+            thread_config,
+            {
+                "confirmation_response": action,
+                "awaiting_confirmation": False,
+            },
+        )
+
+        async for chunk in graph.astream(
+            None,
+            config=thread_config,
+            stream_mode="updates",
+        ):
+            for node_name, node_update in chunk.items():
+                if not isinstance(node_update, dict):
+                    continue
+                await publish(_sse("node", {"node": node_name}))
+
+        await session_manager.touch_session(svc, session_id)
+        await publish(_sse("done", {}))
+
+    except AgentError as exc:
+        logger.error("confirm_stream_failed", error=str(exc))
+        await publish(_sse("error", {"detail": str(exc)}))
+    except Exception:  # noqa: BLE001 — never leave subscribers without a terminal event
+        logger.exception("confirm_stream_crashed")
+        await publish(_sse("error", {"detail": "Internal agent error"}))
+
+
 # ── Chat endpoints ─────────────────────────────────────────────────────────────
 
 
@@ -207,89 +367,32 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
         client_id=runtime.client_id,
         first_message=body.message,
     )
+    documents = await session_documents.list_session_documents(
+        svc,
+        session_id=body.session_id,
+        user_id=runtime.user_id,
+    )
 
-    graph = build_graph(checkpointer=request.app.state.checkpointer)
-    thread_config = _thread_config(body.session_id, runtime)
-    input_state: dict[str, Any] = {
-        "messages": [HumanMessage(content=body.message)],
-        "session_id": body.session_id,
-    }
+    registry = _turn_streams(request)
+    try:
+        turn = await registry.get_or_start(
+            session_id=body.session_id,
+            kind="chat",
+            fingerprint=body.message,
+            runner_factory=lambda publish: _run_chat_turn(
+                session_id=body.session_id,
+                message=body.message,
+                svc=svc,
+                runtime=runtime,
+                checkpointer=request.app.state.checkpointer,
+                documents=documents,
+                publish=publish,
+            ),
+        )
+    except TurnAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    async def generate() -> AsyncGenerator[dict[str, str], None]:
-        try:
-            # If the previous turn left the graph parked at the post_stub confirmation
-            # interrupt, interpret this message as the creator's response to it.
-            prior_state = await graph.aget_state(thread_config)
-            if prior_state.next and "post_stub" in prior_state.next:
-                decision = await classify_confirmation_reply(runtime.llm, body.message)
-                logger.info(
-                    "chat_confirmation_reply",
-                    decision=decision,
-                    session_id=body.session_id,
-                )
-                if decision == "approve":
-                    # Approve in-place: record the message, resume post_stub so the
-                    # OpusClip project is actually created, and finish this turn.
-                    await graph.aupdate_state(
-                        thread_config,
-                        {
-                            "messages": [HumanMessage(content=body.message)],
-                            "confirmation_response": "approved",
-                            "awaiting_confirmation": False,
-                        },
-                    )
-                    async for chunk in graph.astream(
-                        None, config=thread_config, stream_mode="updates"
-                    ):
-                        for node_name, node_update in chunk.items():
-                            if not isinstance(node_update, dict):
-                                continue
-                            safe_update = compact_partial_state(node_name, node_update)
-                            yield _sse(
-                                "node", {"node": node_name, "partial_state": safe_update}
-                            )
-                    await session_manager.touch_session(svc, body.session_id)
-                    yield _sse("done", {"action": "opus_project_created"})
-                    return
-
-                # reject / other → clear the gate WITHOUT running post_stub (no project
-                # created, no canned message), then handle this message as a fresh turn.
-                await graph.aupdate_state(
-                    thread_config,
-                    {"confirmation_response": "rejected", "awaiting_confirmation": False},
-                    as_node="post_stub",
-                )
-
-            async for chunk in graph.astream(
-                input_state,
-                config=thread_config,
-                stream_mode="updates",
-            ):
-                for node_name, node_update in chunk.items():
-                    if not isinstance(node_update, dict):
-                        continue  # LangGraph emits __interrupt__ as a tuple; skip it
-                    safe_update = compact_partial_state(node_name, node_update)
-                    yield _sse("node", {"node": node_name, "partial_state": safe_update})
-
-            graph_state = await graph.aget_state(thread_config)
-
-            # Bump session turn count after the graph completes.
-            await session_manager.touch_session(svc, body.session_id)
-
-            if graph_state.next and "post_stub" in graph_state.next:
-                final_rec = graph_state.values.get("final_recommendation")
-                yield _sse("awaiting_confirmation", {"recommendation": final_rec})
-            else:
-                yield _sse("done", {})
-
-        except AgentError as exc:
-            logger.error("chat_stream_failed", error=str(exc))
-            yield _sse("error", {"detail": str(exc)})
-        except Exception:  # noqa: BLE001 — never leave the SSE stream without a terminal event
-            logger.exception("chat_stream_crashed")
-            yield _sse("error", {"detail": "Internal agent error"})
-
-    return EventSourceResponse(generate())
+    return EventSourceResponse(iter_turn_events(turn))
 
 
 @app.post("/confirm")
@@ -313,40 +416,25 @@ async def confirm(request: Request, body: ConfirmRequest) -> EventSourceResponse
         client_id=runtime.client_id,
     )
 
-    graph = build_graph(checkpointer=request.app.state.checkpointer)
-    thread_config = _thread_config(body.session_id, runtime)
+    registry = _turn_streams(request)
+    try:
+        turn = await registry.get_or_start(
+            session_id=body.session_id,
+            kind="confirm",
+            fingerprint=body.action,
+            runner_factory=lambda publish: _run_confirm_turn(
+                session_id=body.session_id,
+                action=body.action,
+                svc=svc,
+                runtime=runtime,
+                checkpointer=request.app.state.checkpointer,
+                publish=publish,
+            ),
+        )
+    except TurnAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    async def generate() -> AsyncGenerator[dict[str, str], None]:
-        try:
-            await graph.aupdate_state(
-                thread_config,
-                {
-                    "confirmation_response": body.action,
-                    "awaiting_confirmation": False,
-                },
-            )
-
-            async for chunk in graph.astream(
-                None,
-                config=thread_config,
-                stream_mode="updates",
-            ):
-                for node_name, node_update in chunk.items():
-                    if not isinstance(node_update, dict):
-                        continue
-                    yield _sse("node", {"node": node_name})
-
-            await session_manager.touch_session(svc, body.session_id)
-            yield _sse("done", {})
-
-        except AgentError as exc:
-            logger.error("confirm_stream_failed", error=str(exc))
-            yield _sse("error", {"detail": str(exc)})
-        except Exception:  # noqa: BLE001 — never leave the SSE stream without a terminal event
-            logger.exception("confirm_stream_crashed")
-            yield _sse("error", {"detail": "Internal agent error"})
-
-    return EventSourceResponse(generate())
+    return EventSourceResponse(iter_turn_events(turn))
 
 
 # ── Session endpoints ──────────────────────────────────────────────────────────
@@ -373,6 +461,56 @@ async def create_session(request: Request, body: CreateSessionRequest) -> dict[s
         title=body.title,
     )
     return row
+
+
+@app.post("/sessions/{session_id}/documents", status_code=201)
+async def upload_session_document(
+    session_id: str,
+    request: Request,
+    file: UploadFile = _DOCUMENT_UPLOAD,
+) -> dict[str, Any]:
+    """Upload a text-like document and attach it as session-scoped agent context."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+
+    await session_manager.get_or_create_session(
+        svc,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
+    )
+
+    processed = await session_documents.process_upload_file(file)
+    row = await session_documents.create_session_document(
+        svc,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
+        document=processed,
+    )
+
+    logger.info(
+        "session_document_uploaded",
+        session_id=session_id,
+        user_id=str(user_id),
+        client_id=str(client_id),
+        filename=processed.filename,
+        byte_size=processed.byte_size,
+    )
+
+    return {
+        "doc_id": str(row.get("doc_id")),
+        "session_id": session_id,
+        "filename": processed.filename,
+        "content_type": processed.content_type,
+        "byte_size": processed.byte_size,
+        "char_count": processed.char_count,
+        "summary": processed.summary,
+        "status": row.get("status", "ready"),
+        "created_at": row.get("created_at"),
+    }
 
 
 @app.get("/sessions")
@@ -419,10 +557,12 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
     graph_state = await graph.aget_state(thread_config)
     raw_messages: list[BaseMessage] = graph_state.values.get("messages", [])
     messages = _serialize_messages(raw_messages)
+    turn_status = await _turn_streams(request).get_status(session_id)
 
     return {
         "session_id": session_id,
         "client_id": str(runtime_client_id),
+        "turn_status": turn_status,
         "message_count": len(messages),
         "messages": messages,
     }

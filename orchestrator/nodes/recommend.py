@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig
 from orchestrator.errors import LLMError
 from orchestrator.prompts import load_prompt
 from orchestrator.runtime import RuntimeContext
+from orchestrator.session_documents import build_document_context
 from orchestrator.state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -26,6 +27,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     doctrine = state.get("brand_doctrine") or {}
     transcript = state.get("source_file_content")
     user_query = state.get("refined_query") or state.get("user_query") or ""
+    document_context = build_document_context(list(state.get("session_documents") or []))
 
     payload: dict[str, Any] = {
         "user_query": user_query,
@@ -38,6 +40,8 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     # just the terse candidate JSON — this is what makes the answer in-depth.
     if transcript:
         payload["source_file_content"] = transcript
+    if document_context:
+        payload["session_document_context"] = document_context
 
     messages = [
         SystemMessage(content=prompt),

@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     context_window_messages: int = 12  # sliding window: last N messages sent to LLM
     retrieve_match_count: int = 15  # hybrid_search_transcripts top-K (ranked by relevance)
     clip_candidate_count: int = 4  # how many ranked clip candidates analyze surfaces
+    session_document_max_upload_bytes: int = 2_000_000
+    session_document_context_chars: int = 12_000
+    session_document_max_count: int = 5
     # Target clip length(s) Opus aims for when curating a full-file project (seconds).
     opus_default_clip_seconds: int = 60
     # Comma-separated list of allowed CORS origins. Use "*" for dev/testing.

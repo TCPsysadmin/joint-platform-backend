@@ -12,6 +12,12 @@ def test_agent_state_minimal_construction() -> None:
         "intent": None,
         "follow_up_reuse": False,
         "user_query": None,
+        "source_reference": None,
+        "source_task": None,
+        "source_video_id": None,
+        "source_metadata": None,
+        "source_resolution_error": None,
+        "session_documents": [],
         "refined_query": None,
         "iteration_count": 0,
         "previous_segment_ids": [],
@@ -39,6 +45,12 @@ def test_agent_state_intent_literals() -> None:
             "intent": intent,  # type: ignore[typeddict-item]
             "follow_up_reuse": False,
             "user_query": "test",
+            "source_reference": None,
+            "source_task": None,
+            "source_video_id": None,
+            "source_metadata": None,
+            "source_resolution_error": None,
+            "session_documents": [],
             "refined_query": None,
             "iteration_count": 0,
             "previous_segment_ids": [],
@@ -63,6 +75,18 @@ def test_agent_state_all_fields_json_serialisable() -> None:
         "intent": "new_request",
         "follow_up_reuse": False,
         "user_query": "best hook",
+        "source_reference": "founder-story.mp4",
+        "source_task": "clip_recommendation",
+        "source_video_id": "vid-001",
+        "source_metadata": {"title": "Founder Story", "source_file": "founder-story.mp4"},
+        "source_resolution_error": None,
+        "session_documents": [
+            {
+                "doc_id": "doc-1",
+                "filename": "brief.md",
+                "content_text": "Focus on customer proof.",
+            }
+        ],
         "refined_query": "emotional hook moments",
         "iteration_count": 2,
         "previous_segment_ids": ["seg-1", "seg-2"],
@@ -81,3 +105,6 @@ def test_agent_state_all_fields_json_serialisable() -> None:
     reloaded = json.loads(dumped)
     assert reloaded["session_id"] == "sess-002"
     assert reloaded["iteration_count"] == 2
+    assert reloaded["source_video_id"] == "vid-001"
+    assert reloaded["source_task"] == "clip_recommendation"
+    assert reloaded["session_documents"][0]["filename"] == "brief.md"

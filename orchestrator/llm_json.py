@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 from orchestrator.errors import LLMError
 
@@ -31,6 +31,6 @@ def parse_llm_json(raw: str, *, source: str) -> dict[str, Any]:
         text = match.group("body").strip()
 
     try:
-        return json.loads(text)
+        return cast(dict[str, Any], json.loads(text))
     except json.JSONDecodeError as exc:
         raise LLMError(f"{source} returned non-JSON: {raw!r}") from exc

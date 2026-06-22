@@ -14,6 +14,7 @@ from orchestrator.tools.protocols import (
     AssetHit,
     Doctrine,
     PublishResult,
+    SourceVideo,
     TranscriptHit,
 )
 
@@ -44,6 +45,14 @@ def sample_hits() -> list[TranscriptHit]:
 @pytest.fixture
 def mock_search_tool(sample_hits: list[TranscriptHit]) -> AsyncMock:
     tool = AsyncMock()
+    tool.resolve_source_video = AsyncMock(
+        return_value=SourceVideo(
+            source_video_id="vid-abc",
+            title="Consistency Interview",
+            source_file="consistency-interview.mp4",
+        )
+    )
+    tool.list_transcript_segments_for_video = AsyncMock(return_value=sample_hits[:2])
     tool.search_transcripts = AsyncMock(return_value=sample_hits)
     tool.match_assets = AsyncMock(
         return_value=[
@@ -110,6 +119,7 @@ def mock_embedder() -> AsyncMock:
 def mock_file_tool() -> AsyncMock:
     tool = AsyncMock()
     tool.fetch_source_file = AsyncMock(return_value=None)
+    tool.fetch_file_by_name = AsyncMock(return_value=None)
     tool.get_download_url = AsyncMock(return_value=None)
     tool.list_buckets = AsyncMock(return_value=[])
     tool.list_file_names = AsyncMock(return_value=([], None))

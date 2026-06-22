@@ -15,12 +15,19 @@ logger = structlog.get_logger(__name__)
 async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
 
+    if state.get("source_file_content"):
+        return {}
+
     segments = state.get("retrieved_segments") or []
-    if not segments:
+    source_video_id = str(state.get("source_video_id") or "")
+
+    if not segments and not source_video_id:
         return {"source_file_content": None}
 
-    # Use the top-ranked segment's video as the source to download.
-    source_video_id = str(segments[0].get("video_id") or "")
+    # For source-specific requests, use the resolved source video. Otherwise use
+    # the top-ranked segment's video as before.
+    if not source_video_id:
+        source_video_id = str(segments[0].get("video_id") or "")
     if not source_video_id:
         logger.warning("fetch_source_no_video_id", session_id=state.get("session_id"))
         return {"source_file_content": None}

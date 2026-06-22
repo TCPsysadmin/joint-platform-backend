@@ -13,6 +13,7 @@ from orchestrator.errors import LLMError, RetrievalError
 from orchestrator.llm_json import parse_llm_json
 from orchestrator.prompts import load_prompt
 from orchestrator.runtime import RuntimeContext
+from orchestrator.session_documents import build_document_context
 from orchestrator.state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -26,6 +27,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     segments = state.get("retrieved_segments") or []
     doctrine = state.get("brand_doctrine") or {}
     source_file_content = state.get("source_file_content")
+    document_context = build_document_context(list(state.get("session_documents") or []))
 
     payload: dict[str, object] = {
         "user_query": query,
@@ -33,8 +35,16 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         "segments": segments,
         "brand_doctrine": doctrine,
     }
+    if state.get("source_reference"):
+        payload["source_reference"] = state.get("source_reference")
+    if state.get("source_video_id"):
+        payload["source_video_id"] = state.get("source_video_id")
+    if state.get("source_metadata"):
+        payload["source_metadata"] = state.get("source_metadata")
     if source_file_content:
         payload["source_file_content"] = source_file_content
+    if document_context:
+        payload["session_document_context"] = document_context
 
     messages = [
         SystemMessage(content=prompt),

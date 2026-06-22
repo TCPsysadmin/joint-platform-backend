@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from orchestrator.tools.local.b2_file import _is_text_file, _normalize_file_match_text
 from orchestrator.tools.local.doctrine import SupabaseDoctrineTool
 from orchestrator.tools.local.opusclip_stub import OpusClipStub
 from orchestrator.tools.local.supabase_search import SupabaseSearchTool
@@ -34,6 +35,20 @@ def test_supabase_doctrine_tool_satisfies_protocol() -> None:
 def test_opusclip_stub_satisfies_protocol() -> None:
     tool = OpusClipStub()
     assert isinstance(tool, PublishTool)
+
+
+def test_b2_text_detection_skips_binary_audio() -> None:
+    assert _is_text_file("TCP001_DITL_20250502 - JUST TRY.mp3", "audio/mpeg") is False
+    assert _is_text_file("transcripts/TCP001_DITL_20250502 - JUST TRY.txt", "") is True
+    assert _is_text_file("transcripts/source.vtt", "application/octet-stream") is True
+
+
+def test_b2_filename_matching_normalizes_extension_and_punctuation() -> None:
+    assert _normalize_file_match_text(
+        "TCP003_MEETINGS_20230724 - Interpersonal Conflict Dr. Kieschnick"
+    ) == _normalize_file_match_text(
+        "TCP003_MEETINGS_20230724 - Interpersonal Conflict Dr Kieschnick.mp3"
+    )
 
 
 # ── OpusClipStub functional test (no real I/O) ───────────────────────────────

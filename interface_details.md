@@ -342,6 +342,9 @@ export async function streamTurn(
 - After a turn ends (`done` or `awaiting_confirmation`), **re-fetch**
   `GET /sessions/:id/messages` to pull the authoritative assistant message text
   (the SSE `node` events deliberately omit full message bodies).
+- On page return/reload, `GET /sessions/:id/messages` includes `turn_status`.
+  Keep the progress UI visible while it is `"running"` and refresh messages until
+  it becomes `"idle"` or `"completed"`.
 
 ### 7.3 Message sourcing rule
 
@@ -397,7 +400,7 @@ Tailwind tokens (extend `tailwind.config.ts`), dark-first:
 | Case | Handling |
 |------|----------|
 | Mid-stream `error` event | Render an error bubble with the `detail`; set turn → `error`; re-enable composer; offer **Retry** (re-send last message). |
-| Dropped SSE connection | `fetch-event-source` `onerror` throws to stop infinite retry; show a "Connection lost — retry" affordance. |
+| Dropped SSE connection | The backend keeps the turn running. Re-fetch messages; if `turn_status` is `"running"`, keep a progress state visible and refresh until the assistant message appears. |
 | Token expires mid-stream | A 401 surfaces via `onerror`; refresh token and re-issue the turn, or bounce to `/login`. |
 | Reload during `awaiting_confirmation` | On load, `getMessages` restores history. The recommendation lives in the assistant message; show the card with Approve/Reject still actionable (the backend's run is still paused server-side). |
 | Empty session list | Sidebar shows "No conversations yet"; center shows the empty-state prompt. |
