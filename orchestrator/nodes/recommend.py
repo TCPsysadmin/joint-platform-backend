@@ -16,13 +16,63 @@ from orchestrator.state import AgentState
 logger = structlog.get_logger(__name__)
 
 
+def _build_source_lookup(state: AgentState) -> dict[str, dict[str, str]]:
+    """Map each video_id to its human-readable source title/file.
+
+    Pulls from `retrieved_segments[].metadata` (which carries source_title and
+    source_file per segment — this is what covers the multi-video general-search
+    case) and from `source_metadata` (the single resolved source for
+    source-specific requests). First non-empty value for a field wins, so a real
+    name is never clobbered by a blank.
+    """
+    lookup: dict[str, dict[str, str]] = {}
+
+    def _record(video_id: str, title: object, source_file: object) -> None:
+        if not video_id:
+            return
+        entry = lookup.setdefault(video_id, {})
+        if title and "source_title" not in entry:
+            entry["source_title"] = str(title)
+        if source_file and "source_file" not in entry:
+            entry["source_file"] = str(source_file)
+
+    for seg in state.get("retrieved_segments") or []:
+        meta = seg.get("metadata")
+        meta_dict = meta if isinstance(meta, dict) else {}
+        _record(
+            str(seg.get("video_id") or ""),
+            meta_dict.get("source_title"),
+            meta_dict.get("source_file"),
+        )
+
+    sm = state.get("source_metadata") or {}
+    _record(str(sm.get("source_video_id") or ""), sm.get("title"), sm.get("source_file"))
+
+    return lookup
+
+
+def _with_source(clip: dict[str, object], lookup: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """Tag a clip with the human-readable source title/file of its video."""
+    enriched: dict[str, Any] = dict(clip)
+    src = lookup.get(str(clip.get("video_id") or ""), {})
+    if src.get("source_title"):
+        enriched["source_title"] = src["source_title"]
+    if src.get("source_file"):
+        enriched["source_file"] = src["source_file"]
+    return enriched
+
+
 async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
     prompt = load_prompt("recommend.md")
 
-    clips = state.get("candidate_clips") or []
-    if not clips and state.get("candidate_recommendation"):
-        clips = [state["candidate_recommendation"]]  # type: ignore[list-item]
+    raw_clips = state.get("candidate_clips") or []
+    if not raw_clips and state.get("candidate_recommendation"):
+        raw_clips = [state["candidate_recommendation"]]  # type: ignore[list-item]
+    # Tag each clip with the source video it's pulled from so the final answer can
+    # tell the creator which file every option will be clipped from.
+    source_lookup = _build_source_lookup(state)
+    clips = [_with_source(clip, source_lookup) for clip in raw_clips]
     critique = state.get("critique_result") or {}
     doctrine = state.get("brand_doctrine") or {}
     transcript = state.get("source_file_content")
@@ -31,11 +81,16 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "user_query": user_query,
-        # Ranked clip candidates, best-first. The critique below scores the top clip.
+        # Ranked clip candidates, best-first, each tagged with its source video.
+        # The critique below scores the top clip.
         "clips": clips,
         "critique": critique,
         "doctrine": doctrine,
     }
+    # The resolved source (when the request targeted one specific video) — lets the
+    # answer name the single source file up front instead of repeating it per clip.
+    if state.get("source_metadata"):
+        payload["source_metadata"] = state.get("source_metadata")
     # Ground the final recommendation in the actual transcript pulled from B2, not
     # just the terse candidate JSON — this is what makes the answer in-depth.
     if transcript:
