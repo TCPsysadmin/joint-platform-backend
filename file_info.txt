@@ -58,8 +58,10 @@ orchestrator/config.py
     opusclip_api_key
     opusclip_api_url (default: https://api.opus.pro/api)
     max_critique_iterations (default: 3)
+    xai_api_key
+    xai_api_base (default: https://api.x.ai/v1)
     embedding_model (default: text-embedding-3-small)
-    llm_model (default: gpt-4o)
+    llm_model (default: grok-4)
     log_level (default: INFO)
     require_brand_doctrine (default: true)
     context_window_messages (default: 12)
@@ -181,7 +183,7 @@ orchestrator/auth.py
 
   resolve_runtime(request, svc) -> RuntimeContext
     Authenticates the request, creates a service-role Supabase client for tools,
-    constructs the tool registry, ChatOpenAI client, and OpenAI embedder.
+    constructs the tool registry, ChatXAI (Grok) client, and OpenAI embedder.
 
   admin_create_auth_user(email, password) -> UUID
     Calls the Supabase Auth Admin API with the service role key.

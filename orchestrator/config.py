@@ -10,6 +10,14 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     supabase_service_key: str
     supabase_db_url: str
+
+    # xAI (Grok) — powers the chat/reasoning LLM. Get a key at https://console.x.ai
+    xai_api_key: str
+    xai_api_base: str = "https://api.x.ai/v1"
+
+    # OpenAI — used ONLY for embeddings. xAI has no embeddings endpoint, and the
+    # transcript vectors in the DB were generated with `embedding_model` below, so
+    # retrieval must keep using the same OpenAI model to stay in the same vector space.
     openai_api_key: str
 
     langchain_tracing_v2: bool = False
@@ -26,8 +34,8 @@ class Settings(BaseSettings):
     b2_download_url_ttl_seconds: int = 86400
 
     max_critique_iterations: int = 3
-    embedding_model: str = "text-embedding-3-small"
-    llm_model: str = "gpt-4o"
+    embedding_model: str = "text-embedding-3-small"  # OpenAI embeddings (see note above)
+    llm_model: str = "grok-4"  # xAI Grok chat model ID
     log_level: str = "INFO"
     require_brand_doctrine: bool = True
     context_window_messages: int = 12  # sliding window: last N messages sent to LLM

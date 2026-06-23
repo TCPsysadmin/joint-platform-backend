@@ -5,7 +5,7 @@ from uuid import UUID
 import httpx
 import structlog
 from fastapi import Request
-from langchain_openai import ChatOpenAI
+from langchain_xai import ChatXAI
 from openai import AsyncOpenAI
 from pydantic import SecretStr
 from supabase import AsyncClient, create_async_client
@@ -117,11 +117,15 @@ async def resolve_runtime(request: Request, svc: AsyncClient) -> RuntimeContext:
     )
     tools = registry.get_tools(supabase_for_tools, client_id)
 
-    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-    llm = ChatOpenAI(
+    # Chat/reasoning model: xAI Grok (OpenAI-compatible, configurable via env).
+    llm = ChatXAI(
         model=settings.llm_model,
-        api_key=SecretStr(settings.openai_api_key),
+        api_key=SecretStr(settings.xai_api_key),
+        xai_api_base=settings.xai_api_base,
     )
+    # Embeddings stay on OpenAI: xAI has no embeddings endpoint and the stored
+    # transcript vectors are in OpenAI's space.
+    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
     embedder = _OpenAIEmbedder(client=openai_client, model=settings.embedding_model)
 
     return RuntimeContext(

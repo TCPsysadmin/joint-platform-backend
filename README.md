@@ -29,7 +29,8 @@ graph TD
     end
 
     Graph --> Supabase[(Supabase)]
-    Graph --> OpenAI[OpenAI LLM + Embeddings]
+    Graph --> xAI[xAI Grok LLM]
+    Graph --> OpenAI[OpenAI Embeddings]
 ```
 
 ### Runtime context
@@ -106,9 +107,11 @@ uvicorn orchestrator.main:app --reload
 | `SUPABASE_URL` | ✓ | — | Supabase project URL |
 | `SUPABASE_SERVICE_KEY` | ✓ | — | Service-role key (bypasses RLS) |
 | `SUPABASE_DB_URL` | ✓ | — | Postgres connection string for checkpointer |
-| `OPENAI_API_KEY` | ✓ | — | LLM + embeddings |
-| `LLM_MODEL` | | `gpt-4o` | OpenAI chat model ID |
-| `EMBEDDING_MODEL` | | `text-embedding-3-small` | OpenAI embedding model |
+| `XAI_API_KEY` | ✓ | — | xAI (Grok) key for the chat/reasoning LLM |
+| `XAI_API_BASE` | | `https://api.x.ai/v1` | xAI API base URL (override for proxy/region) |
+| `LLM_MODEL` | | `grok-4` | xAI Grok chat model ID |
+| `OPENAI_API_KEY` | ✓ | — | OpenAI key — embeddings only (xAI has no embeddings endpoint) |
+| `EMBEDDING_MODEL` | | `text-embedding-3-small` | OpenAI embedding model (must match the DB's vectors) |
 | `MAX_CRITIQUE_ITERATIONS` | | `3` | Max critique/refine loops before forced approval |
 | `LANGCHAIN_TRACING_V2` | | `false` | Enable LangSmith tracing |
 | `LANGCHAIN_API_KEY` | | — | LangSmith API key |
