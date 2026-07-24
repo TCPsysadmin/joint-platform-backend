@@ -5,8 +5,8 @@ from contextlib import asynccontextmanager
 
 import psycopg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from psycopg import AsyncConnection
 from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from orchestrator.config import settings
 
@@ -22,16 +22,27 @@ async def _setup_checkpointer(checkpointer: AsyncPostgresSaver) -> None:
             await cur.execute("SELECT 1 FROM checkpoint_migrations LIMIT 1")
 
 
+async def _configure_connection(conn: psycopg.AsyncConnection) -> None:
+    await conn.set_autocommit(True)
+    conn.row_factory = dict_row
+
+
 @asynccontextmanager
 async def get_checkpointer() -> AsyncGenerator[AsyncPostgresSaver, None]:
     """Async context manager that yields a ready-to-use Postgres checkpointer."""
+    # A pool (rather than a single connection) so that connections dropped by the
+    # Supabase pooler are detected via `check` and replaced instead of raising
+    # "the connection is closed" on the next request.
     # prepare_threshold=None: required for PgBouncer / Supabase pooler URLs.
-    async with await AsyncConnection.connect(
+    async with AsyncConnectionPool(
         settings.supabase_db_url,
-        autocommit=True,
-        prepare_threshold=None,
-        row_factory=dict_row,
-    ) as conn:
-        checkpointer = AsyncPostgresSaver(conn)
+        min_size=1,
+        max_size=4,
+        kwargs={"prepare_threshold": None},
+        configure=_configure_connection,
+        check=AsyncConnectionPool.check_connection,
+        open=False,
+    ) as pool:
+        checkpointer = AsyncPostgresSaver(pool)
         await _setup_checkpointer(checkpointer)
         yield checkpointer
