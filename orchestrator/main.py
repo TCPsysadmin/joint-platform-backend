@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from supabase import AsyncClient, create_async_client
 
-from orchestrator import session_documents, session_manager
+from orchestrator import media_library, session_documents, session_manager
 from orchestrator.auth import (
     admin_create_auth_user,
     extract_bearer,
@@ -585,6 +585,86 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     if not archived:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"session_id": session_id, "status": "archived"}
+
+
+# ── Media library endpoints ───────────────────────────────────────────────────
+
+
+@app.get("/media")
+async def list_media(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List the authenticated tenant's videos as Drive-style folder cards."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be non-negative")
+
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+    items = await media_library.list_videos(
+        svc,
+        client_id=client_id,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "items": items,
+        "count": len(items),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/media/{source_video_id}")
+async def get_media(source_video_id: str, request: Request) -> dict[str, Any]:
+    """Open one video folder, including its summary and full transcript."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+    item = await media_library.get_video(
+        svc,
+        client_id=client_id,
+        source_video_id=source_video_id,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return item
+
+
+@app.get("/media/{source_video_id}/video-url")
+async def get_media_video_url(source_video_id: str, request: Request) -> dict[str, Any]:
+    """Return a short-lived B2 URL for downloading one tenant-owned source video."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+
+    # Verify the media record belongs to this tenant before resolving storage.
+    item = await media_library.get_video(
+        svc,
+        client_id=runtime.client_id,
+        source_video_id=source_video_id,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    url = await runtime.file_tool.get_download_url(
+        source_video_id,
+        valid_duration_seconds=settings.b2_download_url_ttl_seconds,
+    )
+    if not url:
+        raise HTTPException(status_code=404, detail="Video file is not available")
+
+    video = item.get("video") if isinstance(item.get("video"), dict) else {}
+    return {
+        "url": url,
+        "filename": video.get("source_file"),
+        "expires_in": settings.b2_download_url_ttl_seconds,
+    }
 
 
 # ── Admin endpoints ────────────────────────────────────────────────────────────

@@ -156,10 +156,17 @@ create table if not exists public.video_summaries (
     speakers          text[],
     quality_score     numeric(3,2),
     b2_path           text,
+    thumbnail_url     text,
+    thumbnail_b2_path text,
     created_at        timestamptz default now(),
     updated_at        timestamptz default now(),
     unique (client_id, source_video_id)
 );
+
+-- Keep upgrades idempotent for databases created before media-library thumbnails.
+alter table public.video_summaries
+    add column if not exists thumbnail_url text,
+    add column if not exists thumbnail_b2_path text;
 
 create index if not exists video_summaries_client_idx
     on public.video_summaries (client_id);
