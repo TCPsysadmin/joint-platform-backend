@@ -603,15 +603,14 @@ async def list_media(
         raise HTTPException(status_code=422, detail="offset must be non-negative")
 
     svc: AsyncClient = request.app.state.svc
-    token = extract_bearer(request)
-    user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    runtime = await resolve_runtime(request, svc)
     items = await media_library.list_videos(
         svc,
-        client_id=client_id,
+        client_id=runtime.client_id,
         limit=limit,
         offset=offset,
     )
+    await _attach_signed_thumbnail_urls(runtime, items)
     return {
         "items": items,
         "count": len(items),
@@ -624,17 +623,50 @@ async def list_media(
 async def get_media(source_video_id: str, request: Request) -> dict[str, Any]:
     """Open one video folder, including its summary and full transcript."""
     svc: AsyncClient = request.app.state.svc
-    token = extract_bearer(request)
-    user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    runtime = await resolve_runtime(request, svc)
     item = await media_library.get_video(
         svc,
-        client_id=client_id,
+        client_id=runtime.client_id,
         source_video_id=source_video_id,
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    await _attach_signed_thumbnail_urls(runtime, [item])
     return item
+
+
+async def _attach_signed_thumbnail_urls(
+    runtime: RuntimeContext,
+    items: list[dict[str, Any]],
+) -> None:
+    """Fill private thumbnail URLs without exposing B2 credentials or bucket paths."""
+    paths = [
+        str(thumbnail["b2_path"])
+        for item in items
+        if isinstance((thumbnail := item.get("thumbnail")), dict)
+        and not thumbnail.get("url")
+        and thumbnail.get("b2_path")
+    ]
+    if not paths:
+        return
+    try:
+        signed = await runtime.file_tool.get_path_download_urls(
+            paths,
+            valid_duration_seconds=settings.b2_download_url_ttl_seconds,
+        )
+    except Exception:
+        logger.exception(
+            "media_thumbnail_signing_failed",
+            client_id=str(runtime.client_id),
+        )
+        return
+    for item in items:
+        thumbnail = item.get("thumbnail")
+        if not isinstance(thumbnail, dict) or thumbnail.get("url"):
+            continue
+        path = str(thumbnail.get("b2_path") or "")
+        if path in signed:
+            thumbnail["url"] = signed[path]
 
 
 @app.get("/media/{source_video_id}/video-url")

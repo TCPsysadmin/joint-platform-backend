@@ -238,6 +238,13 @@ class FileTool(Protocol):
         self, source_video_id: str, *, valid_duration_seconds: int = 86400
     ) -> str | None: ...
 
+    async def get_path_download_urls(
+        self,
+        b2_paths: list[str],
+        *,
+        valid_duration_seconds: int = 86400,
+    ) -> dict[str, str]: ...
+
     async def list_buckets(
         self,
         *,

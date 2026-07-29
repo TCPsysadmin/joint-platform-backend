@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import posixpath
 import re
 from typing import Any
@@ -551,12 +552,82 @@ class B2FileTool:
         if resolved is None:
             return None
         bucket_name, full_path = resolved
+        return await self._sign_resolved_path(
+            bucket_name,
+            full_path,
+            valid_duration_seconds=valid_duration_seconds,
+            source_label=source_video_id,
+        )
+
+    async def get_path_download_urls(
+        self,
+        b2_paths: list[str],
+        *,
+        valid_duration_seconds: int = 86400,
+    ) -> dict[str, str]:
+        """Sign tenant-relative B2 paths in a bounded concurrent batch.
+
+        Used by the media-library list endpoint for private thumbnails. Paths
+        are resolved beneath the authenticated client's configured b2_prefix;
+        absolute/traversal paths are rejected.
+        """
+        clean_paths: list[str] = []
+        for raw_path in dict.fromkeys(b2_paths):
+            path = str(raw_path or "").strip()
+            if path.startswith("/") or "\\" in path:
+                continue
+            normalized = posixpath.normpath(path)
+            if not path or normalized in {".", ".."} or normalized.startswith("../"):
+                continue
+            clean_paths.append(normalized)
+        if not clean_paths:
+            return {}
+
+        storage = await self._get_client_storage()
+        if storage is None:
+            return {}
+        bucket_name = storage["bucket"]
+        prefix = storage.get("prefix") or ""
+
+        # Warm the shared authorization and bucket-id caches before concurrent
+        # signing so a page of cards does not repeat account authorization.
+        await self._authorize()
+        if not await self._resolve_bucket_id(bucket_name):
+            return {}
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def sign(relative_path: str) -> tuple[str, str | None]:
+            full_path = (
+                f"{prefix}/{relative_path}".lstrip("/") if prefix else relative_path
+            )
+            async with semaphore:
+                url = await self._sign_resolved_path(
+                    bucket_name,
+                    full_path,
+                    valid_duration_seconds=valid_duration_seconds,
+                    source_label=relative_path,
+                )
+            return relative_path, url
+
+        signed = await asyncio.gather(*(sign(path) for path in clean_paths))
+        return {path: url for path, url in signed if url}
+
+    async def _sign_resolved_path(
+        self,
+        bucket_name: str,
+        full_path: str,
+        *,
+        valid_duration_seconds: int,
+        source_label: str,
+    ) -> str | None:
+        """Mint a download token for an already tenant-resolved bucket/path."""
 
         bucket_id = await self._resolve_bucket_id(bucket_name)
         if not bucket_id:
             logger.warning(
                 "b2_signed_url_no_bucket_id",
-                source_video_id=source_video_id,
+                source=source_label,
                 bucket=bucket_name,
             )
             return None
@@ -580,7 +651,7 @@ class B2FileTool:
         )
         logger.info(
             "b2_signed_url_created",
-            source_video_id=source_video_id,
+            source=source_label,
             path=full_path,
             ttl=valid_duration_seconds,
         )

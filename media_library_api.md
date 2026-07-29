@@ -76,8 +76,10 @@ Returns the same folder fields plus:
 
 `video_summaries.thumbnail_url` supports a public/CDN URL.
 `video_summaries.thumbnail_b2_path` supports a private thumbnail stored alongside
-the media. Existing records may leave both fields null; the frontend should show a
-video placeholder until ingestion generates a thumbnail.
+the media. When only the private path exists, `GET /media` and
+`GET /media/{source_video_id}` fill the response's `thumbnail.url` with a
+short-lived, tenant-scoped B2 URL. Existing records may leave both fields null;
+the frontend should show a video placeholder until ingestion generates a thumbnail.
 
 The visual folder grid belongs in the frontend application. This repository only
 provides the authenticated data contract.

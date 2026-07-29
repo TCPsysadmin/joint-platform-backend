@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator import main, media_library
-from tests.conftest import FAKE_CLIENT_ID, FAKE_USER_ID
+from tests.conftest import FAKE_CLIENT_ID
 
 
 def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
@@ -33,15 +33,17 @@ def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
 @pytest.mark.asyncio
 async def test_list_media_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     svc = object()
+    file_tool = SimpleNamespace(
+        get_path_download_urls=AsyncMock(return_value={})
+    )
+    runtime = SimpleNamespace(client_id=FAKE_CLIENT_ID, file_tool=file_tool)
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
         headers={"authorization": "Bearer token"},
     )
     list_videos = AsyncMock(return_value=[{"id": "vid-123"}])
 
-    monkeypatch.setattr(main, "extract_bearer", lambda _request: "token")
-    monkeypatch.setattr(main, "verify_token", AsyncMock(return_value=FAKE_USER_ID))
-    monkeypatch.setattr(main, "get_client_id", AsyncMock(return_value=FAKE_CLIENT_ID))
+    monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
     monkeypatch.setattr(main.media_library, "list_videos", list_videos)
 
     response = await main.list_media(request, limit=25, offset=10)  # type: ignore[arg-type]
@@ -59,6 +61,12 @@ async def test_list_media_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.mark.asyncio
 async def test_get_media_returns_open_folder(monkeypatch: pytest.MonkeyPatch) -> None:
     svc = object()
+    file_tool = SimpleNamespace(
+        get_path_download_urls=AsyncMock(
+            return_value={"thumbnails/vid-123.webp": "https://download.example/thumb.webp"}
+        )
+    )
+    runtime = SimpleNamespace(client_id=FAKE_CLIENT_ID, file_tool=file_tool)
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
         headers={"authorization": "Bearer token"},
@@ -66,23 +74,24 @@ async def test_get_media_returns_open_folder(monkeypatch: pytest.MonkeyPatch) ->
     get_video = AsyncMock(
         return_value={
             "id": "vid-123",
+            "thumbnail": {"url": None, "b2_path": "thumbnails/vid-123.webp"},
             "transcript": {"segment_count": 1, "text": "Hello"},
         }
     )
 
-    monkeypatch.setattr(main, "extract_bearer", lambda _request: "token")
-    monkeypatch.setattr(main, "verify_token", AsyncMock(return_value=FAKE_USER_ID))
-    monkeypatch.setattr(main, "get_client_id", AsyncMock(return_value=FAKE_CLIENT_ID))
+    monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
     monkeypatch.setattr(main.media_library, "get_video", get_video)
 
     response = await main.get_media("vid-123", request)  # type: ignore[arg-type]
 
     assert response["transcript"]["segment_count"] == 1
+    assert response["thumbnail"]["url"] == "https://download.example/thumb.webp"
     get_video.assert_awaited_once_with(
         svc,
         client_id=FAKE_CLIENT_ID,
         source_video_id="vid-123",
     )
+    file_tool.get_path_download_urls.assert_awaited_once()
 
 
 @pytest.mark.asyncio
