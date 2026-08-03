@@ -554,8 +554,7 @@ class OpusClipTool:
         video_url = str(meta.get("video_url") or payload.video_id or "")
         if not video_url:
             raise ValueError(
-                "OpusClipTool.create_and_post_clip: no video_url in metadata "
-                "or fallback video_id"
+                "OpusClipTool.create_and_post_clip: no video_url in metadata or fallback video_id"
             )
 
         if payload.full_file:
@@ -609,12 +608,7 @@ def _parse_project(data: Any) -> OpusProject:
     inner = raw.get("data") if isinstance(raw, dict) else None
     if isinstance(inner, dict):
         raw = inner
-    project_id = str(
-        raw.get("projectId")
-        or raw.get("id")
-        or raw.get("clipProjectId")
-        or ""
-    )
+    project_id = str(raw.get("projectId") or raw.get("id") or raw.get("clipProjectId") or "")
     return OpusProject(
         project_id=project_id,
         status=raw.get("status"),
@@ -658,9 +652,7 @@ def _parse_collection(row: dict[str, Any]) -> OpusCollection:
     return OpusCollection(
         collection_id=str(row.get("collectionId") or ""),
         name=row.get("collectionName"),
-        metadata={
-            k: row[k] for k in ("createdAt", "updatedAt") if row.get(k) is not None
-        },
+        metadata={k: row[k] for k in ("createdAt", "updatedAt") if row.get(k) is not None},
     )
 
 

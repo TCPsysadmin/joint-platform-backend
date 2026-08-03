@@ -12,8 +12,7 @@ from orchestrator.supabase_json import as_dict_list
 from orchestrator.tools.protocols import AssetHit, SourceVideo, TranscriptHit
 
 _SOURCE_SELECT = (
-    "source_video_id, title, source_file, has_timestamps, duration_seconds, "
-    "recorded_at, b2_path"
+    "source_video_id, title, source_file, has_timestamps, duration_seconds, recorded_at, b2_path"
 )
 _SEGMENT_SELECT = (
     "segment_id, source_video_id, source_title, source_file, has_timestamps, "

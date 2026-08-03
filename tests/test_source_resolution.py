@@ -88,7 +88,7 @@ class _FakeSupabase:
                     ),
                     "source_file": "Interpersonal Conflict Dr Kieschnick.mp3",
                     "has_timestamps": True,
-                }
+                },
             ],
         }
 

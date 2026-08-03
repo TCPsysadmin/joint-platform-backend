@@ -26,9 +26,7 @@ async def classify_confirmation_reply(llm: BaseChatModel, message: str) -> Confi
     """
     prompt = load_prompt("confirm_intent.md")
     try:
-        response = await llm.ainvoke(
-            [SystemMessage(content=prompt), HumanMessage(content=message)]
-        )
+        response = await llm.ainvoke([SystemMessage(content=prompt), HumanMessage(content=message)])
         data = parse_llm_json(str(response.content), source="confirm_intent")
         decision = data.get("decision")
     except Exception as exc:  # noqa: BLE001 — never block the turn on classifier failure

@@ -138,7 +138,9 @@ async def test_chat_response_includes_session_document_context(make_runtime: Any
 
 
 @pytest.mark.asyncio
-async def test_upload_session_document_processes_and_persists(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_upload_session_document_processes_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     svc = object()
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),

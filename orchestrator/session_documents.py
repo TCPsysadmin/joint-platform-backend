@@ -188,7 +188,11 @@ async def process_upload_file(
         sha256=hashlib.sha256(raw).hexdigest(),
         content_text=text,
         summary=_summarize_text(text),
-        metadata={"extension": _extension(filename), "document_kind": kind, "extraction": extraction_method},
+        metadata={
+            "extension": _extension(filename),
+            "document_kind": kind,
+            "extraction": extraction_method,
+        },
     )
 
 
@@ -214,11 +218,7 @@ async def create_session_document(
         "metadata": document.metadata,
         "status": "ready",
     }
-    response = (
-        await svc.table("chat_session_documents")
-        .insert(payload)
-        .execute()
-    )
+    response = await svc.table("chat_session_documents").insert(payload).execute()
     rows = as_dict_list(response.data if response else None)
     if not rows:
         raise RuntimeError("Failed to persist uploaded session document")
