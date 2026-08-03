@@ -327,11 +327,9 @@ class OpusClipTool:
     # ------------------------------------------------------------------
 
     async def list_collections(self, *, content_id: str | None = None) -> list[OpusCollection]:
-        params: dict[str, Any]
-        if content_id:
-            params = {"q": "findByContentId", "contentId": content_id}
-        else:
-            params = {"q": "mine"}
+        params: dict[str, Any] = (
+            {"q": "findByContentId", "contentId": content_id} if content_id else {"q": "mine"}
+        )
         data = await self._request("GET", "/collections", params=params)
         rows: list[dict[str, Any]] = ((data or {}).get("data") or {}).get("list") or []
         return [_parse_collection(r) for r in rows]
