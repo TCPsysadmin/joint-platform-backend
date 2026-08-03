@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import structlog
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -36,4 +36,4 @@ async def classify_confirmation_reply(llm: BaseChatModel, message: str) -> Confi
     if decision not in ("approve", "reject", "other"):
         logger.warning("confirm_intent_unknown_decision", decision=decision)
         return "other"
-    return decision  # type: ignore[return-value]
+    return cast(ConfirmDecision, decision)

@@ -116,6 +116,14 @@ class OpusClipTool:
             return None
         return resp.json()
 
+    async def _request_dict(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        """`_request` for endpoints whose raw response body we hand straight back.
+
+        Normalises an empty/non-object body to `{}` so callers always get a dict.
+        """
+        data = await self._request(method, path, **kwargs)
+        return data if isinstance(data, dict) else {}
+
     # ------------------------------------------------------------------
     # Projects (POST /clip-projects, POST /clip-projects/{id}/update-visibility)
     # ------------------------------------------------------------------
@@ -188,7 +196,7 @@ class OpusClipTool:
 
     async def share_project(self, project_id: str, *, visibility: str = "PUBLIC") -> dict[str, Any]:
         """Toggle a project's visibility (PUBLIC or DEFAULT)."""
-        return await self._request(
+        return await self._request_dict(
             "POST",
             f"/clip-projects/{project_id}/update-visibility",
             json={"visibility": visibility},
@@ -210,6 +218,7 @@ class OpusClipTool:
         if project_id and collection_id:
             raise ValueError("list_clips: pass project_id OR collection_id, not both")
 
+        params: dict[str, Any]
         if project_id:
             params = {"q": "findByProjectId", "projectId": project_id}
         else:
@@ -339,16 +348,16 @@ class OpusClipTool:
         return _parse_collection(((data or {}).get("data")) or {})
 
     async def delete_collection(self, *, collection_id: str) -> dict[str, Any]:
-        return await self._request("DELETE", f"/collections/{collection_id}")
+        return await self._request_dict("DELETE", f"/collections/{collection_id}")
 
     async def export_collection(self, *, collection_id: str) -> dict[str, Any]:
-        return await self._request("POST", f"/collections/{collection_id}/export", json={})
+        return await self._request_dict("POST", f"/collections/{collection_id}/export", json={})
 
     async def add_clip_to_collection(
         self, *, collection_id: str, content_id: str
     ) -> dict[str, Any]:
         """content_id format: `{projectId}.{clipId}`."""
-        return await self._request(
+        return await self._request_dict(
             "POST",
             "/collection-contents",
             json={"collectionId": collection_id, "contentId": content_id},
@@ -357,7 +366,7 @@ class OpusClipTool:
     async def remove_clip_from_collection(
         self, *, collection_id: str, content_id: str
     ) -> dict[str, Any]:
-        return await self._request(
+        return await self._request_dict(
             "POST",
             "/collection-contents/delete-collection-contents",
             json={
@@ -490,7 +499,7 @@ class OpusClipTool:
         if sub_account_id:
             body["subAccountId"] = sub_account_id
 
-        return await self._request("POST", "/post-tasks", json=body)
+        return await self._request_dict("POST", "/post-tasks", json=body)
 
     async def schedule_post(
         self,
@@ -627,6 +636,7 @@ def _parse_clip(row: dict[str, Any]) -> OpusClip:
         project_id = ""
         clip_id = raw_id
     score = row.get("score")
+    duration_ms = row.get("durationMs")
     judge = row.get("judgeResult") or {}
     return OpusClip(
         project_id=project_id,
@@ -635,7 +645,7 @@ def _parse_clip(row: dict[str, Any]) -> OpusClip:
         description=row.get("description"),
         hashtags=list(row.get("hashtags") or []),
         score=float(score) if score is not None else None,
-        duration_ms=int(row.get("durationMs")) if row.get("durationMs") is not None else None,
+        duration_ms=int(duration_ms) if duration_ms is not None else None,
         preview_url=row.get("uriForPreview"),
         export_url=row.get("uriForExport"),
         thumbnail_url=row.get("uriForThumbnail"),

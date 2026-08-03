@@ -121,7 +121,7 @@ async def resolve_runtime(request: Request, svc: AsyncClient) -> RuntimeContext:
     llm = ChatXAI(
         model=settings.llm_model,
         api_key=SecretStr(settings.xai_api_key),
-        xai_api_base=settings.xai_api_base,
+        base_url=settings.xai_api_base,
     )
     # Embeddings stay on OpenAI: xAI has no embeddings endpoint and the stored
     # transcript vectors are in OpenAI's space.
