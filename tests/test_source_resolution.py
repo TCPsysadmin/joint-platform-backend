@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -17,12 +18,26 @@ class _Response:
         self.data = data
 
 
+def _compile_like(pattern: str) -> re.Pattern[str]:
+    """Translate a SQL LIKE pattern to a regex, the way Postgres ILIKE does.
+
+    ``%`` matches any run of characters, ``_`` matches exactly one, and the
+    pattern is anchored against the whole value. Treating the pattern as a
+    plain substring hid two divergences from the real database: internal ``%``
+    wildcards, and the ``_`` that appears in nearly every source_video_id.
+    """
+    translated = "".join(
+        ".*" if ch == "%" else "." if ch == "_" else re.escape(ch) for ch in pattern
+    )
+    return re.compile(translated + r"\Z", re.IGNORECASE | re.DOTALL)
+
+
 class _FakeQuery:
     def __init__(self, table_name: str, rows: list[dict[str, Any]]) -> None:
         self._table_name = table_name
         self._rows = rows
         self._eq: dict[str, str] = {}
-        self._ilike: tuple[str, str] | None = None
+        self._ilike: tuple[str, re.Pattern[str]] | None = None
         self._limit = 10
 
     def select(self, _fields: str) -> _FakeQuery:
@@ -33,7 +48,7 @@ class _FakeQuery:
         return self
 
     def ilike(self, field: str, pattern: str) -> _FakeQuery:
-        self._ilike = (field, pattern.strip("%").lower())
+        self._ilike = (field, _compile_like(pattern))
         return self
 
     def limit(self, count: int) -> _FakeQuery:
@@ -46,8 +61,8 @@ class _FakeQuery:
             if any(str(row.get(field)) != value for field, value in self._eq.items()):
                 continue
             if self._ilike is not None:
-                field, needle = self._ilike
-                if needle not in str(row.get(field) or "").lower():
+                field, regex = self._ilike
+                if not regex.match(str(row.get(field) or "")):
                     continue
             matches.append(row)
         return _Response(matches[: self._limit])
