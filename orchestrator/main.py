@@ -513,6 +513,49 @@ async def upload_session_document(
     }
 
 
+@app.get("/sessions/{session_id}/documents")
+async def get_session_documents(session_id: str, request: Request) -> dict[str, Any]:
+    """List the documents currently attached to an authenticated user's session."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+
+    response = (
+        await svc.table("chat_sessions")
+        .select("user_id")
+        .eq("session_id", session_id)
+        .maybe_single()
+        .execute()
+    )
+    row = as_dict(response.data if response else None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if str(row["user_id"]) != str(user_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    documents = await session_documents.list_session_documents(
+        svc,
+        session_id=session_id,
+        user_id=user_id,
+    )
+    return {
+        "session_id": session_id,
+        "documents": [
+            {
+                "doc_id": str(document.get("doc_id")),
+                "filename": document.get("filename"),
+                "content_type": document.get("content_type"),
+                "byte_size": document.get("byte_size"),
+                "char_count": document.get("char_count"),
+                "summary": document.get("summary"),
+                "status": "ready",
+                "created_at": document.get("created_at"),
+            }
+            for document in documents
+        ],
+    }
+
+
 @app.get("/sessions")
 async def list_sessions(request: Request) -> dict[str, Any]:
     """List the authenticated user's active sessions, newest first."""

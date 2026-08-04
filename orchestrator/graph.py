@@ -9,6 +9,7 @@ from orchestrator.nodes import (
     analyze,
     chat_response,
     critique,
+    expand_clip,
     fetch_doctrine,
     fetch_source,
     post_stub,
@@ -24,6 +25,8 @@ from orchestrator.state import AgentState
 
 def _intent_router(state: AgentState) -> str:
     intent = state.get("intent")
+    if state.get("command") == "expand" and state.get("candidate_recommendation"):
+        return "expand"
     if intent == "chitchat":
         return "chitchat"
     # A follow-up that can reuse the existing chunks/transcript skips retrieval and
@@ -74,6 +77,7 @@ def build_graph(
     builder.add_node("fetch_source", fetch_source.run)
     builder.add_node("analyze", analyze.run)
     builder.add_node("critique", critique.run)
+    builder.add_node("expand_clip", expand_clip.run)
     builder.add_node("refine", refine.run)
     builder.add_node("recommend", recommend.run)
     builder.add_node("post_stub", post_stub.run)
@@ -87,6 +91,7 @@ def build_graph(
         _intent_router,
         {
             "chitchat": "chat_response",
+            "expand": "expand_clip",
             "reuse": "analyze",
             "fetch_doctrine": "fetch_doctrine",
             "retrieve": "retrieve",
@@ -94,6 +99,7 @@ def build_graph(
     )
 
     builder.add_edge("chat_response", END)
+    builder.add_edge("expand_clip", "recommend")
     builder.add_edge("fetch_doctrine", "retrieve")
 
     builder.add_conditional_edges(

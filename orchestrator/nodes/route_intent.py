@@ -45,6 +45,10 @@ _SOURCE_ANSWER_RE = re.compile(
     r")\b",
     re.IGNORECASE | re.DOTALL,
 )
+_EXPAND_COMMAND_RE = re.compile(
+    r"^\s*/?expand(?:\s+(?:by\s+)?(?P<seconds>\d{1,3})(?:\s*(?:s|sec|secs|seconds?))?)?\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _clean_source_reference(value: object) -> str | None:
@@ -110,6 +114,32 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
     prompt = load_prompt("route_intent.md")
 
+    latest_text = _latest_message_text(state["messages"])
+    expand_match = _EXPAND_COMMAND_RE.match(latest_text)
+    if expand_match and state.get("candidate_recommendation"):
+        increment = int(expand_match.group("seconds") or 15)
+        increment = max(1, min(increment, 300))
+        total = int(state.get("expand_seconds") or 0) + increment
+        logger.info(
+            "expand_command_routed",
+            increment_seconds=increment,
+            total_seconds=total,
+            session_id=state.get("session_id"),
+        )
+        return {
+            "intent": "follow_up",
+            "follow_up_reuse": True,
+            "command": "expand",
+            "expand_seconds": total,
+            "user_query": (
+                f"Expand the previously recommended clip by {increment} seconds "
+                "before and after."
+            ),
+            "awaiting_confirmation": False,
+            "confirmation_response": None,
+            "final_recommendation": None,
+        }
+
     windowed = build_context_window(state["messages"], settings.context_window_messages)
     messages = [SystemMessage(content=prompt), *windowed]
 
@@ -120,7 +150,6 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     if intent not in ("new_request", "follow_up", "chitchat"):
         raise LLMError(f"route_intent returned unknown intent: {intent!r}")
 
-    latest_text = _latest_message_text(state["messages"])
     detected_source_reference = _detect_source_reference(latest_text)
 
     # The model decides — in this same call — whether a follow-up can reuse the
@@ -154,6 +183,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     base: dict[str, Any] = {
         "intent": intent,
         "follow_up_reuse": reuse_context,
+        "command": None,
         "user_query": _clean_user_query(data.get("user_query"), fallback=latest_text)
         if intent != "chitchat"
         else None,
@@ -175,6 +205,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         base.update(
             {
                 "refined_query": None,
+                "expand_seconds": 0,
                 "iteration_count": 0,
                 "previous_segment_ids": [],
                 "retrieved_segments": [],

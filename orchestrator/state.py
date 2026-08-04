@@ -13,6 +13,10 @@ class AgentState(TypedDict):
     # For follow_up only: True if the existing retrieved chunks + transcript can
     # answer the follow-up (cheap re-analysis), False if a fresh retrieval is needed.
     follow_up_reuse: bool
+    # Optional deterministic follow-up command. EXPAND extends the previously
+    # recommended clip without running a new semantic search.
+    command: Literal["expand"] | None
+    expand_seconds: int
     user_query: str | None
     # Optional user-specified video/file reference. When present, retrieval is
     # constrained to the resolved source instead of searching across all chunks.
