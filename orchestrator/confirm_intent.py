@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import structlog
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -26,9 +26,7 @@ async def classify_confirmation_reply(llm: BaseChatModel, message: str) -> Confi
     """
     prompt = load_prompt("confirm_intent.md")
     try:
-        response = await llm.ainvoke(
-            [SystemMessage(content=prompt), HumanMessage(content=message)]
-        )
+        response = await llm.ainvoke([SystemMessage(content=prompt), HumanMessage(content=message)])
         data = parse_llm_json(str(response.content), source="confirm_intent")
         decision = data.get("decision")
     except Exception as exc:  # noqa: BLE001 — never block the turn on classifier failure
@@ -38,4 +36,4 @@ async def classify_confirmation_reply(llm: BaseChatModel, message: str) -> Confi
     if decision not in ("approve", "reject", "other"):
         logger.warning("confirm_intent_unknown_decision", decision=decision)
         return "other"
-    return decision  # type: ignore[return-value]
+    return cast(ConfirmDecision, decision)

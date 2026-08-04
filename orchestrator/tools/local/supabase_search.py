@@ -12,8 +12,7 @@ from orchestrator.supabase_json import as_dict_list
 from orchestrator.tools.protocols import AssetHit, SourceVideo, TranscriptHit
 
 _SOURCE_SELECT = (
-    "source_video_id, title, source_file, has_timestamps, duration_seconds, "
-    "recorded_at, b2_path"
+    "source_video_id, title, source_file, has_timestamps, duration_seconds, recorded_at, b2_path"
 )
 _SEGMENT_SELECT = (
     "segment_id, source_video_id, source_title, source_file, has_timestamps, "
@@ -66,7 +65,7 @@ class SupabaseSearchTool:
                 .select(_SOURCE_SELECT)
                 .eq("client_id", str(self._client_id))
             )
-            query = query.eq(field, value) if exact else query.ilike(field, f"%{value}%")
+            query = query.eq(field, value) if exact else query.ilike(field, _like_pattern(value))
             response = await query.limit(10).execute()
             for row in as_dict_list(response.data if response else None):
                 rows_by_id[str(row["source_video_id"])] = row
@@ -77,7 +76,7 @@ class SupabaseSearchTool:
                 .select(_SEGMENT_SOURCE_SELECT)
                 .eq("client_id", str(self._client_id))
             )
-            query = query.eq(field, value) if exact else query.ilike(field, f"%{value}%")
+            query = query.eq(field, value) if exact else query.ilike(field, _like_pattern(value))
             response = await query.limit(10).execute()
             for row in as_dict_list(response.data if response else None):
                 source_video_id = str(row["source_video_id"])
@@ -254,6 +253,27 @@ def _source_reference_variants(value: str) -> list[str]:
             add(coded_match.group(0))
 
     return variants
+
+
+def _like_pattern(value: str) -> str:
+    """Build a punctuation- and whitespace-agnostic ILIKE pattern.
+
+    Stored titles and the reference we are handed rarely agree on separators.
+    The ingestion workflow builds ``title`` by replacing ``[-_]+`` with a
+    space, so ``TCP001_DITL_20250911 - SO WHAT`` is stored with a run of three
+    spaces; by the time the model reads it back out of rendered markdown the
+    run has collapsed to one. A literal ``%<value>%`` then matches nothing and
+    we never get far enough to score the row.
+
+    Collapsing every run of non-alphanumeric characters to ``%`` makes the
+    lookup indifferent to separators in either direction. It is deliberately
+    loose -- ``_source_match_score`` picks the best of the widened candidate
+    set, and each query is still capped at 10 rows.
+    """
+    tokens = [t for t in re.split(r"[^0-9A-Za-z]+", value) if t]
+    if not tokens:
+        return "%"
+    return "%" + "%".join(tokens) + "%"
 
 
 def _normalize_source_text(value: str) -> str:

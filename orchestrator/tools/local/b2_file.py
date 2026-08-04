@@ -369,10 +369,7 @@ class B2FileTool:
                 if (
                     entry.file_name == target
                     or entry_basename == target_basename
-                    or (
-                        target_norm
-                        and _normalize_file_match_text(entry_basename) == target_norm
-                    )
+                    or (target_norm and _normalize_file_match_text(entry_basename) == target_norm)
                 ):
                     return entry
             if not cursor:
@@ -670,7 +667,9 @@ def _parse_file_entry(row: dict[str, Any]) -> B2FileEntry:
         action=action,
         content_length=int(raw_size or 0),
         content_type=str(row["contentType"]) if row.get("contentType") else None,
-        upload_timestamp=int(row["uploadTimestamp"]) if row.get("uploadTimestamp") is not None else None,
+        upload_timestamp=int(row["uploadTimestamp"])
+        if row.get("uploadTimestamp") is not None
+        else None,
         bucket_id=str(row["bucketId"]) if row.get("bucketId") else None,
         metadata={
             k: row[k]

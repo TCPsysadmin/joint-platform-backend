@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import psycopg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from psycopg.rows import dict_row
+from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from orchestrator.config import settings
@@ -22,7 +22,7 @@ async def _setup_checkpointer(checkpointer: AsyncPostgresSaver) -> None:
             await cur.execute("SELECT 1 FROM checkpoint_migrations LIMIT 1")
 
 
-async def _configure_connection(conn: psycopg.AsyncConnection) -> None:
+async def _configure_connection(conn: psycopg.AsyncConnection[DictRow]) -> None:
     await conn.set_autocommit(True)
     conn.row_factory = dict_row
 

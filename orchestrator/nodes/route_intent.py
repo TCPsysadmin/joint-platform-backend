@@ -159,11 +159,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         else None,
     }
 
-    if (
-        intent == "new_request"
-        or (intent == "follow_up" and not reuse_context)
-        or source_reference
-    ):
+    if intent == "new_request" or (intent == "follow_up" and not reuse_context) or source_reference:
         base.update(
             {
                 "source_reference": source_reference,

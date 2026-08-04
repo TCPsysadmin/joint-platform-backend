@@ -177,7 +177,9 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                     source_reference,
                 )
             except Exception as exc:
-                raise RetrievalError(f"Source lookup failed for {source_reference!r}: {exc}") from exc
+                raise RetrievalError(
+                    f"Source lookup failed for {source_reference!r}: {exc}"
+                ) from exc
 
             if source is None:
                 if b2_entry is not None and b2_source_content:

@@ -21,9 +21,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     windowed = build_context_window(state["messages"], settings.context_window_messages)
     document_context = build_document_context(list(state.get("session_documents") or []))
     messages = (
-        [SystemMessage(content=document_context), *windowed]
-        if document_context
-        else windowed
+        [SystemMessage(content=document_context), *windowed] if document_context else windowed
     )
     response = await runtime.llm.ainvoke(messages)
 

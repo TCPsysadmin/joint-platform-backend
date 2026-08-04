@@ -283,8 +283,7 @@ async def test_graph_specific_source_uses_b2_path_when_direct_db_lookup_misses(
     ]
     mock_file_tool.find_file_by_name.return_value = B2FileEntry(
         file_name=(
-            "TCP003_MEETINGS/"
-            "TCP003_MEETINGS_20230724 - Interpersonal Conflict Dr. Kieschnick.mp3"
+            "TCP003_MEETINGS/TCP003_MEETINGS_20230724 - Interpersonal Conflict Dr. Kieschnick.mp3"
         ),
         file_id="b2-file-1",
         action="upload",
