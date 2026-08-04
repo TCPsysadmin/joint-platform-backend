@@ -37,3 +37,4 @@ jobs:
           SUPABASE_SERVICE_KEY: "test-key"
           SUPABASE_DB_URL: "postgresql://test:test@localhost/test"
           OPENAI_API_KEY: "test-key"
+          XAI_API_KEY: "test-key"
