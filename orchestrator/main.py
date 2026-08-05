@@ -633,6 +633,54 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
 # ── Media library endpoints ───────────────────────────────────────────────────
 
 
+@app.get("/ingestion/config")
+async def get_ingestion_config(request: Request) -> dict[str, Any]:
+    """Return the signed-in tenant's configured ingestion destination."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+    response = (
+        await svc.table("clients_registry")
+        .select(
+            "client_id,display_name,drive_transcripts_intake_folder_id,"
+            "drive_summaries_intake_folder_id,"
+            "drive_transcripts_completed_folder_id,"
+            "drive_summaries_completed_folder_id"
+        )
+        .eq("client_id", str(client_id))
+        .maybe_single()
+        .execute()
+    )
+    row = as_dict(response.data if response is not None else None)
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Client ingestion configuration not found",
+        )
+
+    required = {
+        "transcripts_folder_id": row.get("drive_transcripts_intake_folder_id"),
+        "summaries_folder_id": row.get("drive_summaries_intake_folder_id"),
+        "transcripts_completed_folder_id": row.get(
+            "drive_transcripts_completed_folder_id"
+        ),
+        "summaries_completed_folder_id": row.get("drive_summaries_completed_folder_id"),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail="Client ingestion folders are incomplete: " + ", ".join(missing),
+        )
+
+    return {
+        "client_id": str(client_id),
+        "name": str(row.get("display_name") or "Workspace"),
+        **required,
+    }
+
+
 @app.get("/media")
 async def list_media(
     request: Request,

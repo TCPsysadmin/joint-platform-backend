@@ -1,12 +1,55 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from orchestrator import main, media_library
 from tests.conftest import FAKE_CLIENT_ID
+
+
+def _query_response(data: dict[str, object]) -> MagicMock:
+    response = MagicMock()
+    response.data = data
+    query = MagicMock()
+    query.select.return_value.eq.return_value.maybe_single.return_value.execute = AsyncMock(
+        return_value=response
+    )
+    return query
+
+
+@pytest.mark.asyncio
+async def test_ingestion_config_is_resolved_from_authenticated_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = _query_response(
+        {
+            "client_id": str(FAKE_CLIENT_ID),
+            "display_name": "Test Company",
+            "drive_transcripts_intake_folder_id": "transcripts-in",
+            "drive_summaries_intake_folder_id": "summaries-in",
+            "drive_transcripts_completed_folder_id": "transcripts-done",
+            "drive_summaries_completed_folder_id": "summaries-done",
+        }
+    )
+    svc = MagicMock()
+    svc.table.return_value = query
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
+        headers={"authorization": "Bearer token"},
+    )
+    monkeypatch.setattr(main, "verify_token", AsyncMock(return_value="user-id"))
+    monkeypatch.setattr(main, "get_client_id", AsyncMock(return_value=FAKE_CLIENT_ID))
+
+    response = await main.get_ingestion_config(request)  # type: ignore[arg-type]
+
+    assert response["client_id"] == str(FAKE_CLIENT_ID)
+    assert response["name"] == "Test Company"
+    assert response["transcripts_folder_id"] == "transcripts-in"
+    query.select.return_value.eq.assert_called_once_with(
+        "client_id", str(FAKE_CLIENT_ID)
+    )
 
 
 def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
