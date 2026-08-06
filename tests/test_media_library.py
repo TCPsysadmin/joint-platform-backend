@@ -37,7 +37,7 @@ async def test_ingestion_config_is_resolved_from_authenticated_user(
     svc.table.return_value = query
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
-        headers={"authorization": "Bearer token"},
+        headers={"Authorization": "Bearer token"},
     )
     monkeypatch.setattr(main, "verify_token", AsyncMock(return_value="user-id"))
     monkeypatch.setattr(main, "get_client_id", AsyncMock(return_value=FAKE_CLIENT_ID))
