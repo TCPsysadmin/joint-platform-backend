@@ -780,7 +780,8 @@ async def get_media_video_url(source_video_id: str, request: Request) -> dict[st
     if not url:
         raise HTTPException(status_code=404, detail="Video file is not available")
 
-    video = item.get("video") if isinstance(item.get("video"), dict) else {}
+    raw_video = item.get("video")
+    video = raw_video if isinstance(raw_video, dict) else {}
     return {
         "url": url,
         "filename": video.get("source_file"),

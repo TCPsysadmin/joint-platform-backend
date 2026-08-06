@@ -10,6 +10,16 @@ from orchestrator.state import AgentState
 logger = structlog.get_logger(__name__)
 
 
+def _as_float(value: object, default: float) -> float:
+    """Convert timestamp-shaped state safely without trusting untyped graph data."""
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+    return default
+
+
 async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """Extend the primary recommendation on both sides of its current range."""
     _ = config
@@ -21,8 +31,8 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     total = int(state.get("expand_seconds") or increment)
 
     if current.get("has_timestamps"):
-        start = float(current.get("start_seconds") or 0.0)
-        end = float(current.get("end_seconds") or start)
+        start = _as_float(current.get("start_seconds"), 0.0)
+        end = _as_float(current.get("end_seconds"), start)
         current["start_seconds"] = max(0.0, start - increment)
         current["end_seconds"] = end + increment
 

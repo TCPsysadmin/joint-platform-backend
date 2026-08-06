@@ -5,6 +5,11 @@ import pytest
 from orchestrator.nodes import expand_clip
 
 
+def test_timestamp_conversion_accepts_numbers_and_rejects_unknown_values() -> None:
+    assert expand_clip._as_float("12.5", 0.0) == 12.5
+    assert expand_clip._as_float(object(), 7.0) == 7.0
+
+
 @pytest.mark.asyncio
 async def test_expand_clip_extends_both_sides_and_clamps_start() -> None:
     state = {
