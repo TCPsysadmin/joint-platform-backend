@@ -132,8 +132,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             "command": "expand",
             "expand_seconds": total,
             "user_query": (
-                f"Expand the previously recommended clip by {increment} seconds "
-                "before and after."
+                f"Expand the previously recommended clip by {increment} seconds before and after."
             ),
             "awaiting_confirmation": False,
             "confirmation_response": None,

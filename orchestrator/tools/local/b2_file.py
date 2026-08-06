@@ -595,9 +595,7 @@ class B2FileTool:
         semaphore = asyncio.Semaphore(8)
 
         async def sign(relative_path: str) -> tuple[str, str | None]:
-            full_path = (
-                f"{prefix}/{relative_path}".lstrip("/") if prefix else relative_path
-            )
+            full_path = f"{prefix}/{relative_path}".lstrip("/") if prefix else relative_path
             async with semaphore:
                 url = await self._sign_resolved_path(
                     bucket_name,

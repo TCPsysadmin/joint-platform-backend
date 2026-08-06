@@ -47,9 +47,7 @@ async def test_ingestion_config_is_resolved_from_authenticated_user(
     assert response["client_id"] == str(FAKE_CLIENT_ID)
     assert response["name"] == "Test Company"
     assert response["transcripts_folder_id"] == "transcripts-in"
-    query.select.return_value.eq.assert_called_once_with(
-        "client_id", str(FAKE_CLIENT_ID)
-    )
+    query.select.return_value.eq.assert_called_once_with("client_id", str(FAKE_CLIENT_ID))
 
 
 def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
@@ -76,9 +74,7 @@ def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
 @pytest.mark.asyncio
 async def test_list_media_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     svc = object()
-    file_tool = SimpleNamespace(
-        get_path_download_urls=AsyncMock(return_value={})
-    )
+    file_tool = SimpleNamespace(get_path_download_urls=AsyncMock(return_value={}))
     runtime = SimpleNamespace(client_id=FAKE_CLIENT_ID, file_tool=file_tool)
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),

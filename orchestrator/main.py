@@ -662,9 +662,7 @@ async def get_ingestion_config(request: Request) -> dict[str, Any]:
     required = {
         "transcripts_folder_id": row.get("drive_transcripts_intake_folder_id"),
         "summaries_folder_id": row.get("drive_summaries_intake_folder_id"),
-        "transcripts_completed_folder_id": row.get(
-            "drive_transcripts_completed_folder_id"
-        ),
+        "transcripts_completed_folder_id": row.get("drive_transcripts_completed_folder_id"),
         "summaries_completed_folder_id": row.get("drive_summaries_completed_folder_id"),
     }
     missing = [name for name, value in required.items() if not value]

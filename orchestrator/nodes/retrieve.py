@@ -212,9 +212,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             )
             if session_document is not None:
                 content = str(
-                    session_document.get("content_text")
-                    or session_document.get("summary")
-                    or ""
+                    session_document.get("content_text") or session_document.get("summary") or ""
                 ).strip()
                 filename = str(session_document.get("filename") or source_reference)
                 document_id = str(session_document.get("doc_id") or filename)
