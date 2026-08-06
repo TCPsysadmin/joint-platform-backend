@@ -34,7 +34,7 @@ from orchestrator.graph import build_graph
 from orchestrator.observability import bind_request_context, configure_logging
 from orchestrator.runtime import RuntimeContext
 from orchestrator.sse_sanitize import compact_partial_state
-from orchestrator.supabase_json import as_dict
+from orchestrator.supabase_json import as_dict, as_dict_list
 from orchestrator.turn_stream import (
     Publisher,
     TurnAlreadyActiveError,
@@ -677,6 +677,46 @@ async def get_ingestion_config(request: Request) -> dict[str, Any]:
         "name": str(row.get("display_name") or "Workspace"),
         **required,
     }
+
+
+@app.get("/ingestion/destinations")
+async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
+    """List configured Drive destinations available to the ingestion operator."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    await verify_token(token)
+
+    response = (
+        await svc.table("clients_registry")
+        .select(
+            "client_id,display_name,drive_transcripts_intake_folder_id,"
+            "drive_summaries_intake_folder_id,"
+            "drive_transcripts_completed_folder_id,"
+            "drive_summaries_completed_folder_id"
+        )
+        .eq("status", "active")
+        .order("display_name")
+        .execute()
+    )
+    destinations: list[dict[str, str]] = []
+    rows = as_dict_list(response.data if response is not None else None)
+    for row in rows:
+        destination = {
+            "client_id": str(row.get("client_id") or ""),
+            "name": str(row.get("display_name") or "Workspace"),
+            "transcripts_folder_id": str(row.get("drive_transcripts_intake_folder_id") or ""),
+            "summaries_folder_id": str(row.get("drive_summaries_intake_folder_id") or ""),
+            "transcripts_completed_folder_id": str(
+                row.get("drive_transcripts_completed_folder_id") or ""
+            ),
+            "summaries_completed_folder_id": str(
+                row.get("drive_summaries_completed_folder_id") or ""
+            ),
+        }
+        if all(destination.values()):
+            destinations.append(destination)
+
+    return {"destinations": destinations}
 
 
 @app.get("/media")

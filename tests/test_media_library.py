@@ -50,6 +50,58 @@ async def test_ingestion_config_is_resolved_from_authenticated_user(
     query.select.return_value.eq.assert_called_once_with("client_id", str(FAKE_CLIENT_ID))
 
 
+@pytest.mark.asyncio
+async def test_ingestion_destinations_only_returns_complete_active_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = MagicMock()
+    response.data = [
+        {
+            "client_id": str(FAKE_CLIENT_ID),
+            "display_name": "Test Company",
+            "drive_transcripts_intake_folder_id": "transcripts-in",
+            "drive_summaries_intake_folder_id": "summaries-in",
+            "drive_transcripts_completed_folder_id": "transcripts-done",
+            "drive_summaries_completed_folder_id": "summaries-done",
+        },
+        {
+            "client_id": "incomplete-client",
+            "display_name": "Incomplete",
+            "drive_transcripts_intake_folder_id": None,
+            "drive_summaries_intake_folder_id": None,
+            "drive_transcripts_completed_folder_id": None,
+            "drive_summaries_completed_folder_id": None,
+        },
+    ]
+    query = MagicMock()
+    query.select.return_value.eq.return_value.order.return_value.execute = AsyncMock(
+        return_value=response
+    )
+    svc = MagicMock()
+    svc.table.return_value = query
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
+        headers={"Authorization": "Bearer token"},
+    )
+    monkeypatch.setattr(main, "verify_token", AsyncMock(return_value="user-id"))
+
+    result = await main.list_ingestion_destinations(request)  # type: ignore[arg-type]
+
+    assert result == {
+        "destinations": [
+            {
+                "client_id": str(FAKE_CLIENT_ID),
+                "name": "Test Company",
+                "transcripts_folder_id": "transcripts-in",
+                "summaries_folder_id": "summaries-in",
+                "transcripts_completed_folder_id": "transcripts-done",
+                "summaries_completed_folder_id": "summaries-done",
+            }
+        ]
+    }
+    query.select.return_value.eq.assert_called_once_with("status", "active")
+
+
 def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
     payload = media_library._folder_payload(
         {
