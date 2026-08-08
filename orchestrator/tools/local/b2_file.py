@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import posixpath
-import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -11,7 +12,18 @@ import structlog
 from supabase import AsyncClient
 
 from orchestrator.supabase_json import as_dict
-from orchestrator.tools.protocols import B2Bucket, B2FileEntry, B2KeyInfo
+from orchestrator.tools.local.b2_legend import (
+    B2Legend,
+    is_media_file,
+    is_text_file,
+    legend_path,
+    load_legend,
+    normalize_file_match_text,
+    save_legend,
+    sidecar_sort_rank,
+    without_known_extension,
+)
+from orchestrator.tools.protocols import B2Bucket, B2FetchedFile, B2FileEntry, B2KeyInfo
 
 logger = structlog.get_logger(__name__)
 
@@ -21,36 +33,22 @@ _B2_AUTH_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
 # extremely large buckets. Most clients store far fewer than this.
 _FIND_FILE_PAGE_SIZE = 1000
 _FIND_FILE_MAX_PAGES = 10
-_TEXT_FILE_EXTENSIONS = {
-    ".csv",
-    ".json",
-    ".log",
-    ".md",
-    ".srt",
-    ".text",
-    ".txt",
-    ".vtt",
-}
-_TEXT_CONTENT_TYPES = {
-    "application/json",
-    "application/srt",
-    "application/vtt",
-    "text/csv",
-    "text/markdown",
-    "text/plain",
-    "text/srt",
-    "text/vtt",
-}
-_KNOWN_SOURCE_FILE_EXTENSIONS = _TEXT_FILE_EXTENSIONS | {
-    ".aac",
-    ".flac",
-    ".m4a",
-    ".m4v",
-    ".mov",
-    ".mp3",
-    ".mp4",
-    ".wav",
-}
+# The legend sweep pages the whole bucket once; the cap only guards against a
+# pathologically large tenant, not against per-lookup cost.
+_LEGEND_MAX_PAGES = 100
+# 401 codes that mean "your token went stale", i.e. re-authorize and retry once.
+# `missing_auth_token` is deliberately excluded — that one is a client bug.
+_RETRYABLE_AUTH_CODES = {"expired_auth_token", "bad_auth_token"}
+
+# Re-exported for callers/tests that already import these names from this module.
+_is_text_file = is_text_file
+_normalize_file_match_text = normalize_file_match_text
+_without_known_extension = without_known_extension
+
+DEFAULT_LEGEND_CACHE_DIR = ".b2_legend"
+DEFAULT_LEGEND_TTL_SECONDS = 900
+DEFAULT_LEGEND_MIN_REFRESH_SECONDS = 60
+DEFAULT_FETCH_CONCURRENCY = 6
 
 
 class B2FileTool:
@@ -58,10 +56,17 @@ class B2FileTool:
 
     Auth (`authorizationToken`, `apiUrl`, `downloadUrl`, `accountId`) is fetched
     once on first use and cached for the lifetime of this instance — which is
-    one request, since RuntimeContext is per-request.
+    one request, since RuntimeContext is per-request. A 401 carrying
+    `expired_auth_token` / `bad_auth_token` re-authorizes and retries that one
+    call, so a batch that outlives its token doesn't lose the work already done.
 
     Bucket id resolution is also cached so listing operations after the first
     one don't re-hit b2_list_buckets.
+
+    Filename lookups go through a *legend* — a JSON file-index of the tenant's
+    bucket cached on local disk (see `b2_legend`) — instead of re-scanning the
+    bucket on every lookup. `find_file_by_name` still falls back to the
+    paginated scan, so a file uploaded since the last refresh is still found.
     """
 
     def __init__(
@@ -70,6 +75,11 @@ class B2FileTool:
         client_id: UUID,
         key_id: str,
         application_key: str,
+        *,
+        legend_cache_dir: str | Path = DEFAULT_LEGEND_CACHE_DIR,
+        legend_ttl_seconds: int = DEFAULT_LEGEND_TTL_SECONDS,
+        legend_min_refresh_seconds: int = DEFAULT_LEGEND_MIN_REFRESH_SECONDS,
+        fetch_concurrency: int = DEFAULT_FETCH_CONCURRENCY,
     ) -> None:
         self._supabase = supabase
         self._client_id = client_id
@@ -78,6 +88,12 @@ class B2FileTool:
         self._auth: dict[str, str] | None = None
         self._bucket_id_by_name: dict[str, str] = {}
         self._client_storage: dict[str, str] | None = None  # {"bucket": ..., "prefix": ...}
+        self._legend_path = legend_path(legend_cache_dir, client_id)
+        self._legend_ttl_seconds = legend_ttl_seconds
+        self._legend_min_refresh_seconds = legend_min_refresh_seconds
+        self._fetch_concurrency = max(1, fetch_concurrency)
+        self._legend: B2Legend | None = None
+        self._legend_disk_checked = False
 
     # ------------------------------------------------------------------
     # Auth
@@ -313,6 +329,129 @@ class B2FileTool:
         return keys, (str(next_key) if next_key else None)
 
     # ------------------------------------------------------------------
+    # Legend — local file index, so a lookup is a dict access instead of a
+    # multi-page bucket scan. See orchestrator/tools/local/b2_legend.py.
+    # ------------------------------------------------------------------
+
+    async def _build_legend(self, *, bucket: str, prefix: str) -> B2Legend | None:
+        """One full paginated sweep of the tenant's bucket+prefix.
+
+        Requests 1000 per page: B2 bills listing per 1000 entries returned, so
+        asking for less just buys extra round trips at the same price.
+        """
+        bucket_id = await self._resolve_bucket_id(bucket)
+        if not bucket_id:
+            return None
+
+        entries: list[B2FileEntry] = []
+        cursor: str | None = None
+        for _ in range(_LEGEND_MAX_PAGES):
+            page, cursor = await self.list_file_names(
+                bucket_id=bucket_id,
+                prefix=prefix or None,
+                start_file_name=cursor,
+                max_file_count=_FIND_FILE_PAGE_SIZE,
+            )
+            entries.extend(page)
+            if not cursor:
+                break
+
+        legend = B2Legend.from_entries(entries, bucket=bucket, prefix=prefix)
+        logger.info(
+            "b2_legend_built",
+            client_id=str(self._client_id),
+            bucket=bucket,
+            prefix=prefix,
+            listed=len(entries),
+            indexed=legend.entry_count,
+            truncated=bool(cursor),
+        )
+        return legend
+
+    async def refresh_legend(
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        min_age_seconds: int = 0,
+    ) -> B2Legend | None:
+        """Rebuild and persist the legend.
+
+        `min_age_seconds` floors how often a rebuild may happen. Without it, a
+        lookup for a file that genuinely does not exist would sweep the whole
+        bucket *and* run the fallback scan on every single turn — strictly worse
+        than the behaviour this feature replaces.
+
+        A failed rebuild is logged and returns None: callers fall back to the
+        paginated scan rather than failing the turn.
+        """
+        current = self._legend
+        if (
+            current is not None
+            and current.matches(bucket, prefix)
+            and min_age_seconds > 0
+            and current.age_seconds() < min_age_seconds
+        ):
+            return current
+        try:
+            legend = await self._build_legend(bucket=bucket, prefix=prefix)
+        except Exception as exc:
+            logger.warning("b2_legend_build_failed", bucket=bucket, error=str(exc))
+            return None
+        if legend is None:
+            return None
+        self._legend = legend
+        save_legend(self._legend_path, legend)
+        return legend
+
+    async def _get_legend(self, *, bucket: str, prefix: str) -> B2Legend | None:
+        """In-memory → on-disk → rebuild, honouring the TTL at each step."""
+        cached = self._legend
+        if (
+            cached is not None
+            and cached.matches(bucket, prefix)
+            and not cached.is_stale(self._legend_ttl_seconds)
+        ):
+            return cached
+
+        if not self._legend_disk_checked:
+            self._legend_disk_checked = True
+            from_disk = load_legend(self._legend_path)
+            if (
+                from_disk is not None
+                and from_disk.matches(bucket, prefix)
+                and not from_disk.is_stale(self._legend_ttl_seconds)
+            ):
+                self._legend = from_disk
+                return from_disk
+
+        return await self.refresh_legend(bucket=bucket, prefix=prefix)
+
+    async def _resolve_client_location(
+        self,
+        bucket_name: str | None,
+        prefix: str | None,
+    ) -> tuple[str, str, bool] | None:
+        """(bucket, prefix, is_client_default) for a lookup's target location.
+
+        The legend indexes exactly one bucket+prefix — the client's configured
+        one — so a caller that overrides either must bypass it.
+        """
+        storage = await self._get_client_storage()
+        if bucket_name and prefix is not None:
+            is_default = storage is not None and (
+                bucket_name == storage["bucket"] and prefix == (storage.get("prefix") or "")
+            )
+            return bucket_name, prefix, is_default
+        if storage is None:
+            return None
+        return (
+            bucket_name or storage["bucket"],
+            prefix if prefix is not None else (storage.get("prefix") or ""),
+            bucket_name in (None, storage["bucket"]),
+        )
+
+    # ------------------------------------------------------------------
     # High-level search: find a file when only the basename is known
     # ------------------------------------------------------------------
 
@@ -325,9 +464,10 @@ class B2FileTool:
     ) -> B2FileEntry | None:
         """Locate a file by its basename within the client's bucket.
 
-        Paginates through b2_list_file_names under `prefix` (defaults to the
-        client's configured prefix) and returns the first entry whose basename
-        matches `file_name`. Returns None if not found within the page cap.
+        Legend first (O(1) dict access). On a miss, one bounded legend refresh
+        and a retry — the file may have been uploaded since the last sweep.
+        Only then does it fall back to the original paginated b2_list_file_names
+        scan, so correctness never depends on the cache being current.
         """
         target = file_name.strip().strip("/")
         if not target:
@@ -335,16 +475,24 @@ class B2FileTool:
         target_basename = posixpath.basename(target)
         target_norm = _normalize_file_match_text(target_basename)
 
-        # Resolve bucket name → bucket id.
-        resolved_bucket_name = bucket_name
-        resolved_prefix = prefix
-        if not resolved_bucket_name or resolved_prefix is None:
-            storage = await self._get_client_storage()
-            if storage is None:
-                return None
-            resolved_bucket_name = resolved_bucket_name or storage["bucket"]
-            if resolved_prefix is None:
-                resolved_prefix = storage.get("prefix") or ""
+        location = await self._resolve_client_location(bucket_name, prefix)
+        if location is None:
+            return None
+        resolved_bucket_name, resolved_prefix, legend_applies = location
+
+        if legend_applies:
+            legend = await self._get_legend(bucket=resolved_bucket_name, prefix=resolved_prefix)
+            hit = legend.lookup(target) if legend else None
+            if hit is None and legend is not None:
+                legend = await self.refresh_legend(
+                    bucket=resolved_bucket_name,
+                    prefix=resolved_prefix,
+                    min_age_seconds=self._legend_min_refresh_seconds,
+                )
+                hit = legend.lookup(target) if legend else None
+            if hit is not None:
+                logger.debug("b2_legend_hit", file_name=file_name, b2_path=hit.file_name)
+                return hit
 
         bucket_id = await self._resolve_bucket_id(resolved_bucket_name)
         if not bucket_id:
@@ -448,6 +596,31 @@ class B2FileTool:
 
         return bucket, full_path
 
+    async def _download_file(
+        self,
+        http: httpx.AsyncClient,
+        *,
+        bucket: str,
+        full_path: str,
+    ) -> httpx.Response:
+        """GET one file, re-authorizing and retrying once on an expired token.
+
+        The path is percent-encoded the same way `get_download_url` does it —
+        without this, any filename containing a space or a non-ASCII character
+        produces a malformed URL.
+        """
+        for attempt in (0, 1):
+            auth = await self._authorize()
+            url = f"{auth['downloadUrl']}/file/{bucket}/{quote(full_path, safe='/')}"
+            resp = await http.get(url, headers={"Authorization": auth["authorizationToken"]})
+            if attempt == 0 and _is_retryable_auth_failure(resp):
+                logger.info("b2_auth_token_refreshed", path=full_path)
+                self._auth = None
+                continue
+            resp.raise_for_status()
+            return resp
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def _download_text_file(
         self,
         *,
@@ -455,15 +628,11 @@ class B2FileTool:
         full_path: str,
         source_label: str,
     ) -> str | None:
-        auth = await self._authorize()
-        url = f"{auth['downloadUrl']}/file/{bucket}/{full_path}"
-
+        if is_media_file(full_path):
+            logger.info("b2_skipped_media_download", source=source_label, path=full_path)
+            return None
         async with httpx.AsyncClient(timeout=60.0) as http:
-            resp = await http.get(
-                url,
-                headers={"Authorization": auth["authorizationToken"]},
-            )
-            resp.raise_for_status()
+            resp = await self._download_file(http, bucket=bucket, full_path=full_path)
 
         content_type = resp.headers.get("content-type", "").split(";", 1)[0].lower()
         if not _is_text_file(full_path, content_type):
@@ -483,6 +652,118 @@ class B2FileTool:
             bytes=len(resp.content),
         )
         return resp.text
+
+    # ------------------------------------------------------------------
+    # Concurrent multi-file fetch — "dive deeper on clip X" pulls a source
+    # plus its transcript sidecars in one bounded batch.
+    # ------------------------------------------------------------------
+
+    async def fetch_files(
+        self,
+        *,
+        paths: list[str],
+        bucket_name: str | None = None,
+    ) -> list[B2FetchedFile]:
+        """Download several files concurrently, one result per requested path.
+
+        Shares a single `httpx.AsyncClient` — and therefore one connection pool
+        and one B2 auth token, which B2 documents as safe across concurrent
+        downloads — for the whole batch, and bounds fan-out with a semaphore.
+        `return_exceptions=True`: a missing subtitle sidecar must not take down
+        the transcript that was fetched fine alongside it.
+        """
+        wanted: list[str] = []
+        for path in paths:
+            cleaned = path.strip().strip("/")
+            if cleaned and cleaned not in wanted:
+                wanted.append(cleaned)
+        if not wanted:
+            return []
+
+        if bucket_name:
+            bucket = bucket_name
+        else:
+            storage = await self._get_client_storage()
+            if storage is None:
+                return []
+            bucket = storage["bucket"]
+
+        semaphore = asyncio.Semaphore(self._fetch_concurrency)
+        limit = httpx.Limits(
+            max_connections=self._fetch_concurrency,
+            max_keepalive_connections=self._fetch_concurrency,
+        )
+
+        async def _fetch_one(http: httpx.AsyncClient, full_path: str) -> B2FetchedFile:
+            # Content-type is only readable after the whole body has arrived, so
+            # a video would be downloaded in full and then discarded. Its name is
+            # enough to rule it out first.
+            if is_media_file(full_path):
+                logger.info("b2_skipped_media_download", path=full_path)
+                return B2FetchedFile(file_name=full_path, is_text=False)
+            async with semaphore:
+                resp = await self._download_file(http, bucket=bucket, full_path=full_path)
+            content_type = resp.headers.get("content-type", "").split(";", 1)[0].lower()
+            if not _is_text_file(full_path, content_type):
+                return B2FetchedFile(file_name=full_path, is_text=False)
+            return B2FetchedFile(file_name=full_path, content=resp.text, is_text=True)
+
+        # Scoped to the batch rather than to the tool instance: nothing in the
+        # request path disposes tools, and a turn runs in a detached task that
+        # outlives its HTTP request — an instance-level client would either leak
+        # or be closed underneath a running fetch.
+        async with httpx.AsyncClient(timeout=60.0, limits=limit) as http:
+            outcomes = await asyncio.gather(
+                *(_fetch_one(http, p) for p in wanted),
+                return_exceptions=True,
+            )
+
+        results: list[B2FetchedFile] = []
+        for full_path, outcome in zip(wanted, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                logger.warning("b2_batch_fetch_failed", path=full_path, error=str(outcome))
+                results.append(B2FetchedFile(file_name=full_path, error=str(outcome)))
+            else:
+                results.append(outcome)
+        logger.info(
+            "b2_batch_fetch_completed",
+            requested=len(wanted),
+            with_text=sum(1 for r in results if r.content),
+            failed=sum(1 for r in results if r.error),
+        )
+        return results
+
+    async def fetch_source_bundle(self, source_video_id: str) -> list[B2FetchedFile]:
+        """The readable text belonging to a source, fetched concurrently.
+
+        A source resolves to its *video* far more often than to a transcript, and
+        a video carries no ingestible text — so this deliberately fetches the
+        transcript/summary sidecars the legend pairs with that stem, and the
+        resolved file itself only when it is already text. Downloading the video
+        to discover it is not text costs tens of seconds and yields nothing.
+        """
+        resolved = await self._resolve_source_path(source_video_id)
+        if resolved is None:
+            return []
+        bucket, full_path = resolved
+
+        paths: list[str] = [full_path] if not is_media_file(full_path) else []
+        location = await self._resolve_client_location(bucket, None)
+        if location is not None and location[2]:
+            legend = await self._get_legend(bucket=location[0], prefix=location[1])
+            if legend is not None:
+                paths.extend(e.file_name for e in legend.text_siblings(full_path))
+
+        if not paths:
+            logger.info(
+                "b2_no_text_for_source",
+                source_video_id=source_video_id,
+                resolved_path=full_path,
+            )
+            return []
+
+        paths.sort(key=sidecar_sort_rank)
+        return await self.fetch_files(paths=paths, bucket_name=bucket)
 
     async def fetch_source_file(self, source_video_id: str) -> str | None:
         resolved = await self._resolve_source_path(source_video_id)
@@ -542,12 +823,25 @@ class B2FileTool:
         external service can fetch the private file directly from B2.
 
         `valid_duration_seconds` must be in [1, 604800] (B2's 7-day cap).
-        Returns None if the source_video_id can't be resolved to a file.
+        Returns None if the source_video_id can't be resolved to a *video* file.
         """
         resolved = await self._resolve_source_path(source_video_id)
         if resolved is None:
             return None
         bucket_name, full_path = resolved
+
+        # Resolution is deliberately permissive so a source whose video was never
+        # uploaded can still be *read* via its transcript. Publishing is the one
+        # caller that must not benefit from that: this URL goes to OpusClip, which
+        # would be asked to cut a video out of a .txt. Fail the gate cleanly, the
+        # way an unresolvable source always has.
+        if not is_media_file(full_path):
+            logger.warning(
+                "b2_signed_url_not_media",
+                source_video_id=source_video_id,
+                resolved_path=full_path,
+            )
+            return None
 
         bucket_id = await self._resolve_bucket_id(bucket_name)
         if not bucket_id:
@@ -608,21 +902,16 @@ def _parse_file_entry(row: dict[str, Any]) -> B2FileEntry:
     )
 
 
-def _is_text_file(path: str, content_type: str | None) -> bool:
-    normalized_type = (content_type or "").split(";", 1)[0].lower()
-    if normalized_type.startswith("text/") or normalized_type in _TEXT_CONTENT_TYPES:
-        return True
-    extension = posixpath.splitext(path.lower())[1]
-    return extension in _TEXT_FILE_EXTENSIONS
+def _is_retryable_auth_failure(resp: httpx.Response) -> bool:
+    """True for a 401 that a fresh b2_authorize_account would fix.
 
-
-def _without_known_extension(value: str) -> str:
-    root, extension = posixpath.splitext(value)
-    if extension.lower() not in _KNOWN_SOURCE_FILE_EXTENSIONS:
-        return value
-    return root
-
-
-def _normalize_file_match_text(value: str) -> str:
-    stem = _without_known_extension(posixpath.basename(value.strip().strip("/"))).lower()
-    return re.sub(r"[^a-z0-9]+", " ", stem).strip()
+    B2 returns 401 for `missing_auth_token` (a client bug), `bad_auth_token` and
+    `expired_auth_token`; only the last two are worth retrying.
+    """
+    if resp.status_code != 401:
+        return False
+    try:
+        code = str((resp.json() or {}).get("code") or "")
+    except ValueError:
+        return False
+    return code in _RETRYABLE_AUTH_CODES

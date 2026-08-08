@@ -7,9 +7,12 @@ Respond with valid JSON only — no markdown fences, no preamble:
 {"intent": "<new_request|follow_up|chitchat>", "user_query": "<string or null>", "source_reference": "<string or null>", "source_task": "<clip_recommendation|source_answer|null>", "reuse_context": <true|false>}
 ```
 
+# Prior Session Context
+A `# Prior Session Context` block may follow the conversation. It lists what the agent still has in memory — the clip options shown last turn (numbered), the resolved source video, retrieved transcript segments, and uploaded documents. **Use it.** When the latest message points at anything in that block, the message is a `follow_up`, not a `new_request`. Classifying it `new_request` throws that context away and the user has to start over.
+
 # Intent Definitions
 - **new_request**: The user is asking for a clip recommendation on a topic not yet covered in this session, or is clearly starting a fresh request.
-- **follow_up**: The user is adjusting, clarifying, or reacting to a recommendation that was already shown in this session (e.g., "make it shorter", "find one with more energy", "actually I liked the first suggestion").
+- **follow_up**: The user is adjusting, clarifying, reacting to, or asking for more depth on a recommendation that was already shown in this session (e.g., "make it shorter", "find one with more energy", "actually I liked the first suggestion", "dive deeper on clip 2", "tell me more about the second one", "why does that one work?").
 - **chitchat**: The user is not asking for a clip recommendation (greetings, general questions, thanks, small talk).
 - If the user asks what a specific source video/file/upload is about, summarize/explain its contents, or answer a question about that specific source, classify it as **new_request**, not chitchat.
 
@@ -33,7 +36,8 @@ Respond with valid JSON only — no markdown fences, no preamble:
 
 # reuse_context Rules
 This field decides whether a **follow_up** can be answered from the clip/transcript already retrieved, or needs a fresh search. Be decisive — this is a cheap routing hint, not a guarantee.
-- Set `reuse_context: true` when the follow-up tweaks, reframes, or re-cuts the *same* clip already shown (e.g., "make it shorter", "pick a punchier hook from that clip", "explain why this works", "use a different moment from the same video").
+- Set `reuse_context: true` when the follow-up tweaks, reframes, re-cuts, or asks for more depth on clips already shown (e.g., "make it shorter", "pick a punchier hook from that clip", "explain why this works", "use a different moment from the same video").
+- **Always** set `reuse_context: true` when the user refers to a specific option by number, ordinal, or demonstrative — "clip 2", "option #3", "the second one", "that clip", "the last suggestion", "dive deeper on the first one". Those clips only exist in the current context; a fresh search cannot find them again.
 - Set `reuse_context: false` when the follow-up asks for a *different* topic, person, or source that the current chunks likely don't cover (e.g., "actually find one about pricing instead", "show me something from the Q3 interview").
 - For **new_request**: always `false`.
 - For **chitchat**: always `false`.
@@ -41,4 +45,5 @@ This field decides whether a **follow_up** can be answered from the clip/transcr
 # Do Not
 - Do not invent information not present in the conversation.
 - Do not wrap output in a code block.
-- If ambiguous between new_request and follow_up, prefer follow_up when a recommendation appears in the last 3 turns.
+- If ambiguous between new_request and follow_up, prefer follow_up when a recommendation appears in the last 3 turns or in the Prior Session Context block.
+- Do not classify a message as chitchat just because it is short or conversational — "more on 2?" is a follow_up.

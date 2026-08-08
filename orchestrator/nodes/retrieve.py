@@ -222,6 +222,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                         **doctrine_patch,
                         **source_patch,
                         "source_file_content": b2_source_content,
+                        "source_content_video_id": source_video_id,
                         "retrieved_segments": [segment],
                         "previous_segment_ids": [segment["segment_id"]],
                     }

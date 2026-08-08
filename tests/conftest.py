@@ -126,6 +126,8 @@ def mock_file_tool() -> AsyncMock:
     tool.list_file_versions = AsyncMock(return_value=([], None, None))
     tool.list_keys = AsyncMock(return_value=([], None))
     tool.find_file_by_name = AsyncMock(return_value=None)
+    tool.fetch_files = AsyncMock(return_value=[])
+    tool.fetch_source_bundle = AsyncMock(return_value=[])
     return tool
 
 

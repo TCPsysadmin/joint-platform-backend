@@ -46,5 +46,9 @@ def get_tools(supabase: AsyncClient, client_id: UUID) -> ToolSet:
             client_id=client_id,
             key_id=settings.b2_key_id,
             application_key=settings.b2_application_key,
+            legend_cache_dir=settings.b2_legend_cache_dir,
+            legend_ttl_seconds=settings.b2_legend_ttl_seconds,
+            legend_min_refresh_seconds=settings.b2_legend_min_refresh_seconds,
+            fetch_concurrency=settings.b2_fetch_concurrency,
         ),
     )

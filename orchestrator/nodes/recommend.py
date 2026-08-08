@@ -15,6 +15,8 @@ from orchestrator.state import AgentState
 
 logger = structlog.get_logger(__name__)
 
+_PREVIOUS_RECOMMENDATION_CHARS = 4000
+
 
 def _build_source_lookup(state: AgentState) -> dict[str, dict[str, str]]:
     """Map each video_id to its human-readable source title/file.
@@ -97,6 +99,14 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         payload["source_file_content"] = transcript
     if document_context:
         payload["session_document_context"] = document_context
+    # On a follow-up, `final_recommendation` still holds the previous turn's answer
+    # (this node overwrites it below). Passing it through keeps option numbering and
+    # phrasing continuous instead of presenting the follow-up as a cold new answer.
+    previous_recommendation = state.get("final_recommendation")
+    if state.get("intent") == "follow_up" and previous_recommendation:
+        payload["previous_recommendation"] = str(previous_recommendation)[
+            :_PREVIOUS_RECOMMENDATION_CHARS
+        ]
 
     messages = [
         SystemMessage(content=prompt),
