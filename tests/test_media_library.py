@@ -99,9 +99,7 @@ async def test_ingestion_destinations_only_returns_authenticated_client(
             }
         ]
     }
-    query.select.return_value.eq.assert_called_once_with(
-        "client_id", str(FAKE_CLIENT_ID)
-    )
+    query.select.return_value.eq.assert_called_once_with("client_id", str(FAKE_CLIENT_ID))
     tenant_query.eq.assert_called_once_with("status", "active")
 
 
