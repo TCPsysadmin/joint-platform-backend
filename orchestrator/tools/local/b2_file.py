@@ -906,7 +906,7 @@ class B2FileTool:
         if not is_media_file(full_path):
             logger.warning(
                 "b2_signed_url_not_media",
-                source_video_id=source_video_id,
+                source=source_label,
                 resolved_path=full_path,
             )
             return None
