@@ -371,6 +371,7 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
         svc,
         session_id=body.session_id,
         user_id=runtime.user_id,
+        client_id=runtime.client_id,
     )
 
     registry = _turn_streams(request)
@@ -519,10 +520,11 @@ async def get_session_documents(session_id: str, request: Request) -> dict[str, 
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
 
     response = (
         await svc.table("chat_sessions")
-        .select("user_id")
+        .select("user_id,client_id")
         .eq("session_id", session_id)
         .maybe_single()
         .execute()
@@ -532,11 +534,14 @@ async def get_session_documents(session_id: str, request: Request) -> dict[str, 
         raise HTTPException(status_code=404, detail="Session not found")
     if str(row["user_id"]) != str(user_id):
         raise HTTPException(status_code=403, detail="Forbidden")
+    if str(row.get("client_id") or "") != str(client_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     documents = await session_documents.list_session_documents(
         svc,
         session_id=session_id,
         user_id=user_id,
+        client_id=client_id,
     )
     return {
         "session_id": session_id,
@@ -562,8 +567,9 @@ async def list_sessions(request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
 
-    sessions = await session_manager.list_sessions(svc, user_id)
+    sessions = await session_manager.list_sessions(svc, user_id, client_id)
     return {"sessions": sessions}
 
 
@@ -577,11 +583,12 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    runtime_client_id = await get_client_id(user_id, svc)
 
-    # Ownership check: verify the session belongs to this user.
+    # Ownership check: verify the session belongs to this user and tenant.
     response = (
         await svc.table("chat_sessions")
-        .select("user_id")
+        .select("user_id,client_id")
         .eq("session_id", session_id)
         .maybe_single()
         .execute()
@@ -591,9 +598,10 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
         raise HTTPException(status_code=404, detail="Session not found")
     if str(row["user_id"]) != str(user_id):
         raise HTTPException(status_code=403, detail="Forbidden")
+    if str(row.get("client_id") or "") != str(runtime_client_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     # Load message history from LangGraph checkpoint state.
-    runtime_client_id = await get_client_id(user_id, svc)
     graph = build_graph(checkpointer=request.app.state.checkpointer)
     thread_config = _thread_config(session_id)
 
@@ -623,8 +631,9 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
 
-    archived = await session_manager.archive_session(svc, session_id, user_id)
+    archived = await session_manager.archive_session(svc, session_id, user_id, client_id)
     if not archived:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"session_id": session_id, "status": "archived"}
@@ -681,10 +690,11 @@ async def get_ingestion_config(request: Request) -> dict[str, Any]:
 
 @app.get("/ingestion/destinations")
 async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
-    """List configured Drive destinations available to the ingestion operator."""
+    """List only the authenticated user's configured Drive destination."""
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
-    await verify_token(token)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
 
     response = (
         await svc.table("clients_registry")
@@ -694,6 +704,7 @@ async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
             "drive_transcripts_completed_folder_id,"
             "drive_summaries_completed_folder_id"
         )
+        .eq("client_id", str(client_id))
         .eq("status", "active")
         .order("display_name")
         .execute()
@@ -701,6 +712,10 @@ async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
     destinations: list[dict[str, str]] = []
     rows = as_dict_list(response.data if response is not None else None)
     for row in rows:
+        # Defense in depth for this service-role query: never serialize a row
+        # outside the authenticated tenant even if the upstream filter changes.
+        if str(row.get("client_id") or "") != str(client_id):
+            continue
         destination = {
             "client_id": str(row.get("client_id") or ""),
             "name": str(row.get("display_name") or "Workspace"),

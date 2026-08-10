@@ -794,7 +794,12 @@ revoke execute on function public.increment_session_count(text) from public, ano
 -- Takes p_user_id and scopes the update to that owner so the service-role call
 -- (which bypasses RLS) still cannot archive another user's session.
 -- Returns true if a matching, still-active session was archived; false otherwise.
-create or replace function public.archive_session(p_session_id text, p_user_id uuid)
+drop function if exists public.archive_session(text, uuid);
+create or replace function public.archive_session(
+    p_session_id text,
+    p_user_id uuid,
+    p_client_id uuid
+)
 returns boolean
 language plpgsql
 security definer
@@ -808,13 +813,17 @@ begin
       updated_at = now()
   where session_id = p_session_id
     and user_id    = p_user_id
+    and client_id  = p_client_id
     and status     = 'active';
   get diagnostics v_count = row_count;
   return v_count > 0;
 end;
 $$;
 
-revoke execute on function public.archive_session(text, uuid) from public, anon, authenticated;
+revoke all on function public.archive_session(text, uuid, uuid)
+    from public, anon, authenticated;
+grant execute on function public.archive_session(text, uuid, uuid)
+    to service_role;
 
 
 -- ============================================================================
@@ -823,8 +832,11 @@ revoke execute on function public.archive_session(text, uuid) from public, anon,
 
 -- Hybrid semantic + lexical search over transcript chunks.
 -- Combines pgvector cosine similarity with full-text search via Reciprocal Rank Fusion.
--- security invoker = runs as caller; RLS enforces client isolation automatically.
+-- The orchestrator calls this RPC with the service-role key, which bypasses RLS.
+-- Keep an explicit client predicate in every CTE as the authorization boundary.
+drop function if exists public.hybrid_search_transcripts(text, vector, integer, integer, numeric);
 create or replace function public.hybrid_search_transcripts(
+    p_client_id        uuid,
     p_query_text       text,
     p_query_embedding  vector(1536),
     p_match_count      integer default 40,
@@ -852,7 +864,8 @@ with semantic as (
     select ts.segment_id,
            row_number() over (order by ts.embedding <=> p_query_embedding) as rnk
     from public.transcript_segments ts
-    where ts.embedding is not null
+    where ts.client_id = p_client_id
+      and ts.embedding is not null
       and (ts.end_seconds - ts.start_seconds) >= p_min_seconds
     order by ts.embedding <=> p_query_embedding
     limit p_match_count * 2
@@ -866,7 +879,8 @@ lexical as (
              ) desc
            ) as rnk
     from public.transcript_segments ts
-    where to_tsvector('english', ts.transcript_text)
+    where ts.client_id = p_client_id
+      and to_tsvector('english', ts.transcript_text)
           @@ websearch_to_tsquery('english', p_query_text)
     limit p_match_count * 2
 ),
@@ -890,16 +904,21 @@ select ts.segment_id,
        f.score
 from fused f
 join public.transcript_segments ts using (segment_id)
+where ts.client_id = p_client_id
 order by f.score desc
 limit p_match_count;
 $$;
 
-grant execute on function public.hybrid_search_transcripts(text, vector, integer, integer, numeric)
-    to authenticated;
+revoke all on function public.hybrid_search_transcripts(uuid, text, vector, integer, integer, numeric)
+    from public, anon, authenticated;
+grant execute on function public.hybrid_search_transcripts(uuid, text, vector, integer, integer, numeric)
+    to service_role;
 
 
 -- Hybrid search over video summaries — broad discovery ("which videos are about X").
+drop function if exists public.hybrid_search_summaries(text, vector, integer, integer);
 create or replace function public.hybrid_search_summaries(
+    p_client_id        uuid,
     p_query_text       text,
     p_query_embedding  vector(1536),
     p_match_count      integer default 20,
@@ -922,7 +941,8 @@ with semantic as (
     select vs.summary_id,
            row_number() over (order by vs.summary_embedding <=> p_query_embedding) as rnk
     from public.video_summaries vs
-    where vs.summary_embedding is not null
+    where vs.client_id = p_client_id
+      and vs.summary_embedding is not null
     order by vs.summary_embedding <=> p_query_embedding
     limit p_match_count * 2
 ),
@@ -935,7 +955,8 @@ lexical as (
              ) desc
            ) as rnk
     from public.video_summaries vs
-    where to_tsvector('english', vs.summary_text)
+    where vs.client_id = p_client_id
+      and to_tsvector('english', vs.summary_text)
           @@ websearch_to_tsquery('english', p_query_text)
     limit p_match_count * 2
 ),
@@ -955,17 +976,22 @@ select vs.summary_id,
        f.score
 from fused f
 join public.video_summaries vs using (summary_id)
+where vs.client_id = p_client_id
 order by f.score desc
 limit p_match_count;
 $$;
 
-grant execute on function public.hybrid_search_summaries(text, vector, integer, integer)
-    to authenticated;
+revoke all on function public.hybrid_search_summaries(uuid, text, vector, integer, integer)
+    from public, anon, authenticated;
+grant execute on function public.hybrid_search_summaries(uuid, text, vector, integer, integer)
+    to service_role;
 
 
 -- Semantic match over the asset catalog — used by the Director agent to find
 -- creative assets (characters, B-roll prompts, voices, etc.) matching a beat.
+drop function if exists public.match_assets(vector, text[], integer);
 create or replace function public.match_assets(
+    p_client_id      uuid,
     p_query_embedding vector(1536),
     p_asset_types     text[] default null,
     p_match_count     integer default 8
@@ -985,15 +1011,18 @@ as $$
   select ac.asset_id, ac.asset_type, ac.name, ac.description, ac.parameters,
          (1 - (ac.embedding <=> p_query_embedding))::numeric as similarity
   from public.asset_catalog ac
-  where ac.is_active = true
+  where ac.client_id = p_client_id
+    and ac.is_active = true
     and ac.embedding is not null
     and (p_asset_types is null or ac.asset_type = any(p_asset_types))
   order by ac.embedding <=> p_query_embedding
   limit p_match_count;
 $$;
 
-grant execute on function public.match_assets(vector, text[], integer)
-    to authenticated;
+revoke all on function public.match_assets(uuid, vector, text[], integer)
+    from public, anon, authenticated;
+grant execute on function public.match_assets(uuid, vector, text[], integer)
+    to service_role;
 
 
 -- ============================================================================

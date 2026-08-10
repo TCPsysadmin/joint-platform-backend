@@ -7,6 +7,12 @@ alter table public.clients_registry
     add column if not exists drive_transcripts_completed_folder_id text,
     add column if not exists drive_summaries_completed_folder_id text;
 
+-- Databases created before the media-library UI do not have thumbnail fields.
+-- Keep this additive and idempotent so it is safe to rerun during rollout.
+alter table public.video_summaries
+    add column if not exists thumbnail_url text,
+    add column if not exists thumbnail_b2_path text;
+
 create unique index if not exists clients_registry_transcripts_intake_uidx
     on public.clients_registry (drive_transcripts_intake_folder_id)
     where drive_transcripts_intake_folder_id is not null;

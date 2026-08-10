@@ -51,7 +51,7 @@ async def test_ingestion_config_is_resolved_from_authenticated_user(
 
 
 @pytest.mark.asyncio
-async def test_ingestion_destinations_only_returns_complete_active_clients(
+async def test_ingestion_destinations_only_returns_authenticated_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     response = MagicMock()
@@ -65,18 +65,17 @@ async def test_ingestion_destinations_only_returns_complete_active_clients(
             "drive_summaries_completed_folder_id": "summaries-done",
         },
         {
-            "client_id": "incomplete-client",
-            "display_name": "Incomplete",
-            "drive_transcripts_intake_folder_id": None,
-            "drive_summaries_intake_folder_id": None,
-            "drive_transcripts_completed_folder_id": None,
-            "drive_summaries_completed_folder_id": None,
+            "client_id": "other-client",
+            "display_name": "Other Company",
+            "drive_transcripts_intake_folder_id": "other-transcripts-in",
+            "drive_summaries_intake_folder_id": "other-summaries-in",
+            "drive_transcripts_completed_folder_id": "other-transcripts-done",
+            "drive_summaries_completed_folder_id": "other-summaries-done",
         },
     ]
     query = MagicMock()
-    query.select.return_value.eq.return_value.order.return_value.execute = AsyncMock(
-        return_value=response
-    )
+    tenant_query = query.select.return_value.eq.return_value
+    tenant_query.eq.return_value.order.return_value.execute = AsyncMock(return_value=response)
     svc = MagicMock()
     svc.table.return_value = query
     request = SimpleNamespace(
@@ -84,6 +83,7 @@ async def test_ingestion_destinations_only_returns_complete_active_clients(
         headers={"Authorization": "Bearer token"},
     )
     monkeypatch.setattr(main, "verify_token", AsyncMock(return_value="user-id"))
+    monkeypatch.setattr(main, "get_client_id", AsyncMock(return_value=FAKE_CLIENT_ID))
 
     result = await main.list_ingestion_destinations(request)  # type: ignore[arg-type]
 
@@ -99,7 +99,10 @@ async def test_ingestion_destinations_only_returns_complete_active_clients(
             }
         ]
     }
-    query.select.return_value.eq.assert_called_once_with("status", "active")
+    query.select.return_value.eq.assert_called_once_with(
+        "client_id", str(FAKE_CLIENT_ID)
+    )
+    tenant_query.eq.assert_called_once_with("status", "active")
 
 
 def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
