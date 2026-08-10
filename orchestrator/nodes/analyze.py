@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from orchestrator.config import settings
+from orchestrator.context import summarize_prior_clips
 from orchestrator.errors import LLMError, RetrievalError
 from orchestrator.llm_json import parse_llm_json
 from orchestrator.prompts import load_prompt
@@ -17,6 +18,10 @@ from orchestrator.session_documents import build_document_context
 from orchestrator.state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+# The prior turn's rendered markdown is only there to disambiguate ordinal
+# references; the structured `previous_clips` carry the actual data, so cap it.
+_PREVIOUS_RECOMMENDATION_CHARS = 4000
 
 
 async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -45,6 +50,25 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         payload["source_file_content"] = source_file_content
     if document_context:
         payload["session_document_context"] = document_context
+
+    # Follow-up memory. `candidate_clips` / `final_recommendation` still hold the
+    # PREVIOUS turn's answer at this point (this node overwrites candidate_clips on
+    # return, and recommend overwrites final_recommendation later), so a message like
+    # "dive deeper on clip 2" can be resolved positionally against what was shown.
+    #
+    # Only on the FIRST analyze of the turn. critique increments iteration_count, so
+    # on a refine loop (analyze → critique → refine → retrieve → analyze) candidate_clips
+    # would hold this turn's rejected draft — pinning refinement to the clips critique
+    # just threw out is the opposite of what refine is for.
+    if state.get("intent") == "follow_up" and state.get("iteration_count", 0) == 0:
+        previous_clips = summarize_prior_clips(list(state.get("candidate_clips") or []))
+        if previous_clips:
+            payload["previous_clips"] = previous_clips
+        previous_recommendation = state.get("final_recommendation")
+        if previous_recommendation:
+            payload["previous_recommendation"] = str(previous_recommendation)[
+                :_PREVIOUS_RECOMMENDATION_CHARS
+            ]
 
     messages = [
         SystemMessage(content=prompt),

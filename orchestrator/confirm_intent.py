@@ -6,6 +6,7 @@ import structlog
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from orchestrator.context import is_clip_refinement_request
 from orchestrator.llm_json import parse_llm_json
 from orchestrator.prompts import load_prompt
 
@@ -24,6 +25,15 @@ async def classify_confirmation_reply(llm: BaseChatModel, message: str) -> Confi
     Falls back to "other" on any classification/parse failure — the safe default,
     since it never creates a project the user didn't clearly ask for.
     """
+    # "yes, let's dive deeper on clip 2" is a refinement wearing an approval's
+    # clothes. Reading it as "approve" publishes to OpusClip and returns before the
+    # graph ever sees the request, which looks to the creator like being ignored.
+    # Requires BOTH a clip reference and an ask for more/different — a clip
+    # reference alone would swallow real approvals like "make this clip".
+    if is_clip_refinement_request(message):
+        logger.info("confirm_intent_clip_reference_override", decision="other")
+        return "other"
+
     prompt = load_prompt("confirm_intent.md")
     try:
         response = await llm.ainvoke([SystemMessage(content=prompt), HumanMessage(content=message)])

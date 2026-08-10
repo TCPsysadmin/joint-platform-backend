@@ -226,6 +226,12 @@ async def _run_chat_turn(
 ) -> None:
     graph = build_graph(checkpointer=checkpointer)
     thread_config = _thread_config(session_id, runtime)
+    # Only these three keys. Any key present here overwrites the checkpointed value
+    # for channels without a reducer, so everything the previous turn learned
+    # (retrieved_segments, candidate_clips, final_recommendation, brand_doctrine, …)
+    # must be left out and restored from the checkpoint. `messages` is safe because
+    # it uses the add_messages reducer (appends); `session_documents` is re-read from
+    # Postgres each turn and is authoritative.
     input_state: dict[str, Any] = {
         "messages": [HumanMessage(content=message)],
         "session_id": session_id,

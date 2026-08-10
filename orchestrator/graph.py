@@ -32,7 +32,10 @@ def _intent_router(state: AgentState) -> str:
     # A follow-up that can reuse the existing chunks/transcript skips retrieval and
     # re-analyzes directly. Otherwise it falls through to the same retrieval path as
     # a new request (route_intent has already reset the loop state for it).
-    if intent == "follow_up" and state.get("follow_up_reuse"):
+    # Guard: only take the shortcut when there is genuinely something to reuse —
+    # analyze has no segments to work from otherwise and would fail the turn.
+    has_reusable_context = bool(state.get("retrieved_segments") or state.get("source_file_content"))
+    if intent == "follow_up" and state.get("follow_up_reuse") and has_reusable_context:
         return "reuse"
     if settings.require_brand_doctrine and state.get("brand_doctrine") is None:
         return "fetch_doctrine"
@@ -92,7 +95,12 @@ def build_graph(
         {
             "chitchat": "chat_response",
             "expand": "expand_clip",
-            "reuse": "analyze",
+            # Reuse enters at fetch_source, not analyze: retrieval is still
+            # skipped, but "dive deeper on clip 2" gets a chance to ingest that
+            # clip's source file if it isn't in context yet. fetch_source
+            # short-circuits when the right transcript is already there, and
+            # _fetch_source_router lands on analyze exactly as before.
+            "reuse": "fetch_source",
             "fetch_doctrine": "fetch_doctrine",
             "retrieve": "retrieve",
         },
