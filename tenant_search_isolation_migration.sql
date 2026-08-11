@@ -8,7 +8,10 @@ begin;
 
 -- A user can be reassigned to another client. Keep old chat history bound to
 -- its original client even though the user_id itself has not changed.
-drop function if exists public.archive_session(text, uuid);
+--
+-- Keep the legacy overloads during deployment so the currently running
+-- backend continues to work until Render has switched to the tenant-aware
+-- release. Remove them with tenant_search_isolation_cleanup.sql afterward.
 
 create or replace function public.archive_session(
     p_session_id text,
@@ -39,10 +42,6 @@ revoke all on function public.archive_session(text, uuid, uuid)
     from public, anon, authenticated;
 grant execute on function public.archive_session(text, uuid, uuid)
     to service_role;
-
-drop function if exists public.hybrid_search_transcripts(
-    text, vector, integer, integer, numeric
-);
 
 create or replace function public.hybrid_search_transcripts(
     p_client_id        uuid,
@@ -125,10 +124,6 @@ grant execute on function public.hybrid_search_transcripts(
     uuid, text, vector, integer, integer, numeric
 ) to service_role;
 
-drop function if exists public.hybrid_search_summaries(
-    text, vector, integer, integer
-);
-
 create or replace function public.hybrid_search_summaries(
     p_client_id        uuid,
     p_query_text       text,
@@ -199,8 +194,6 @@ revoke all on function public.hybrid_search_summaries(
 grant execute on function public.hybrid_search_summaries(
     uuid, text, vector, integer, integer
 ) to service_role;
-
-drop function if exists public.match_assets(vector, text[], integer);
 
 create or replace function public.match_assets(
     p_client_id       uuid,
