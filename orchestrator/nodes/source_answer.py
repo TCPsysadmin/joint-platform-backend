@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig
 from orchestrator.errors import LLMError
 from orchestrator.prompts import load_prompt
 from orchestrator.runtime import RuntimeContext
+from orchestrator.session_documents import build_document_context
 from orchestrator.state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -61,6 +62,11 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         "source_file_content": source_file_content,
         "segments": segments,
     }
+    # Uploaded session documents are re-supplied every turn; this node was the one
+    # answer path that dropped them.
+    document_context = build_document_context(list(state.get("session_documents") or []))
+    if document_context:
+        payload["session_document_context"] = document_context
 
     messages = [
         SystemMessage(content=load_prompt("source_answer.md")),

@@ -58,6 +58,10 @@ create table if not exists public.clients_registry (
     display_name       text not null,
     b2_bucket          text,
     b2_prefix          text default '',
+    drive_transcripts_intake_folder_id    text,
+    drive_summaries_intake_folder_id      text,
+    drive_transcripts_completed_folder_id text,
+    drive_summaries_completed_folder_id   text,
     source_kind        text not null default 'managed'
                        check (source_kind in ('managed','b2','gdrive','dropbox','manual')),
     status             text not null default 'active'
@@ -70,6 +74,21 @@ create table if not exists public.clients_registry (
     updated_at         timestamptz default now(),
     metadata           jsonb default '{}'::jsonb
 );
+
+-- Keep upgrades idempotent for clients created before Drive ingestion mapping.
+alter table public.clients_registry
+    add column if not exists drive_transcripts_intake_folder_id text,
+    add column if not exists drive_summaries_intake_folder_id text,
+    add column if not exists drive_transcripts_completed_folder_id text,
+    add column if not exists drive_summaries_completed_folder_id text;
+
+create unique index if not exists clients_registry_transcripts_intake_uidx
+    on public.clients_registry (drive_transcripts_intake_folder_id)
+    where drive_transcripts_intake_folder_id is not null;
+
+create unique index if not exists clients_registry_summaries_intake_uidx
+    on public.clients_registry (drive_summaries_intake_folder_id)
+    where drive_summaries_intake_folder_id is not null;
 
 create index if not exists clients_registry_active_idx
     on public.clients_registry (status) where status = 'active';
@@ -156,10 +175,17 @@ create table if not exists public.video_summaries (
     speakers          text[],
     quality_score     numeric(3,2),
     b2_path           text,
+    thumbnail_url     text,
+    thumbnail_b2_path text,
     created_at        timestamptz default now(),
     updated_at        timestamptz default now(),
     unique (client_id, source_video_id)
 );
+
+-- Keep upgrades idempotent for databases created before media-library thumbnails.
+alter table public.video_summaries
+    add column if not exists thumbnail_url text,
+    add column if not exists thumbnail_b2_path text;
 
 create index if not exists video_summaries_client_idx
     on public.video_summaries (client_id);
@@ -177,6 +203,153 @@ drop trigger if exists trg_video_summaries_updated on public.video_summaries;
 create trigger trg_video_summaries_updated
     before update on public.video_summaries
     for each row execute function public.set_updated_at();
+
+
+-- ---------- INGESTION MANIFESTS ----------
+-- Durable handoff between the immediate Drive upload workflow and the scheduled
+-- embedding/indexing workflow. One row binds the reviewed Drive artifacts to the
+-- original B2 video and thumbnail.
+create table if not exists public.ingestion_manifests (
+    manifest_id               uuid primary key default uuid_generate_v4(),
+    idempotency_key           text unique not null,
+    client_id                 uuid not null references public.clients_registry(client_id) on delete cascade,
+    source_video_id           text not null,
+    title                     text,
+    source_file               text,
+    b2_bucket                 text,
+    b2_path                   text,
+    thumbnail_b2_path         text,
+    transcript_drive_file_id  text,
+    transcript_url            text,
+    summary_drive_file_id     text,
+    summary_url               text,
+    status                    text not null default 'completed'
+                              check (status in ('processing','completed','failed')),
+    error                     text,
+    created_at                timestamptz default now(),
+    updated_at                timestamptz default now(),
+    unique (client_id, source_video_id)
+);
+
+create unique index if not exists ingestion_manifests_transcript_file_uidx
+    on public.ingestion_manifests (transcript_drive_file_id)
+    where transcript_drive_file_id is not null;
+
+create unique index if not exists ingestion_manifests_summary_file_uidx
+    on public.ingestion_manifests (summary_drive_file_id)
+    where summary_drive_file_id is not null;
+
+create index if not exists ingestion_manifests_client_idx
+    on public.ingestion_manifests (client_id, updated_at desc);
+
+drop trigger if exists trg_ingestion_manifests_updated on public.ingestion_manifests;
+create trigger trg_ingestion_manifests_updated
+    before update on public.ingestion_manifests
+    for each row execute function public.set_updated_at();
+
+-- Completes the immediate Drive handoff and creates/updates the lightweight
+-- media row in one transaction. The scheduled workflow later adds embeddings
+-- and transcript chunks to the same (client_id, source_video_id) record.
+create or replace function public.admin_complete_ingestion(
+    p_idempotency_key text,
+    p_client_id uuid,
+    p_source_video_id text,
+    p_title text,
+    p_source_file text,
+    p_b2_bucket text,
+    p_b2_path text,
+    p_thumbnail_b2_path text,
+    p_transcripts_folder_id text,
+    p_summaries_folder_id text,
+    p_transcript_drive_file_id text,
+    p_transcript_url text,
+    p_summary_drive_file_id text,
+    p_summary_url text
+)
+returns table (
+    ok boolean,
+    source_video_id text,
+    transcript_file_id text,
+    transcript_url text,
+    summary_file_id text,
+    summary_url text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+#variable_conflict use_column
+declare
+    v_client public.clients_registry%rowtype;
+begin
+    select *
+      into v_client
+      from public.clients_registry
+     where client_id = p_client_id
+       and status = 'active'
+       and drive_transcripts_intake_folder_id = p_transcripts_folder_id
+       and drive_summaries_intake_folder_id = p_summaries_folder_id;
+
+    if not found then
+        raise exception 'Ingestion destination is not registered for client %', p_client_id;
+    end if;
+
+    if p_b2_path is not null
+       and coalesce(v_client.b2_bucket, '') <> coalesce(p_b2_bucket, '') then
+        raise exception 'B2 bucket does not match clients_registry for client %', p_client_id;
+    end if;
+
+    insert into public.ingestion_manifests (
+        idempotency_key, client_id, source_video_id, title, source_file,
+        b2_bucket, b2_path, thumbnail_b2_path,
+        transcript_drive_file_id, transcript_url,
+        summary_drive_file_id, summary_url, status, error
+    )
+    values (
+        p_idempotency_key, p_client_id, p_source_video_id, p_title, p_source_file,
+        p_b2_bucket, p_b2_path, p_thumbnail_b2_path,
+        p_transcript_drive_file_id, p_transcript_url,
+        p_summary_drive_file_id, p_summary_url, 'completed', null
+    )
+    on conflict (client_id, source_video_id) do update set
+        idempotency_key          = excluded.idempotency_key,
+        title                    = excluded.title,
+        source_file              = excluded.source_file,
+        b2_bucket                = coalesce(excluded.b2_bucket, ingestion_manifests.b2_bucket),
+        b2_path                  = coalesce(excluded.b2_path, ingestion_manifests.b2_path),
+        thumbnail_b2_path        = coalesce(excluded.thumbnail_b2_path, ingestion_manifests.thumbnail_b2_path),
+        transcript_drive_file_id = excluded.transcript_drive_file_id,
+        transcript_url           = excluded.transcript_url,
+        summary_drive_file_id    = excluded.summary_drive_file_id,
+        summary_url              = excluded.summary_url,
+        status                   = 'completed',
+        error                    = null;
+
+    insert into public.video_summaries (
+        client_id, source_video_id, title, source_file, b2_path, thumbnail_b2_path
+    )
+    values (
+        p_client_id, p_source_video_id, p_title, p_source_file, p_b2_path, p_thumbnail_b2_path
+    )
+    on conflict (client_id, source_video_id) do update set
+        title             = coalesce(excluded.title, video_summaries.title),
+        source_file       = coalesce(excluded.source_file, video_summaries.source_file),
+        b2_path           = coalesce(excluded.b2_path, video_summaries.b2_path),
+        thumbnail_b2_path = coalesce(excluded.thumbnail_b2_path, video_summaries.thumbnail_b2_path),
+        updated_at        = now();
+
+    return query
+    select true, p_source_video_id, p_transcript_drive_file_id, p_transcript_url,
+           p_summary_drive_file_id, p_summary_url;
+end;
+$$;
+
+revoke all on function public.admin_complete_ingestion(
+    text, uuid, text, text, text, text, text, text, text, text, text, text, text, text
+) from public, anon, authenticated;
+grant execute on function public.admin_complete_ingestion(
+    text, uuid, text, text, text, text, text, text, text, text, text, text, text, text
+) to service_role;
 
 
 -- ---------- TRANSCRIPT SEGMENTS ----------
@@ -427,6 +600,11 @@ create trigger trg_validate_client_transcript_segments
   before insert or update on public.transcript_segments
   for each row execute function public.validate_client_id();
 
+drop trigger if exists trg_validate_client_ingestion_manifests on public.ingestion_manifests;
+create trigger trg_validate_client_ingestion_manifests
+  before insert or update on public.ingestion_manifests
+  for each row execute function public.validate_client_id();
+
 
 -- Auto-fills source_title and source_file on new transcript_segments from
 -- the parent video_summaries row. Saves the agent from needing a join.
@@ -480,12 +658,15 @@ create trigger trg_propagate_summary_changes
 
 alter table public.video_summaries     enable row level security;
 alter table public.transcript_segments enable row level security;
+alter table public.ingestion_manifests enable row level security;
 alter table public.brand_doctrine      enable row level security;
 alter table public.asset_catalog       enable row level security;
 alter table public.blueprints          enable row level security;
 alter table public.job_runs            enable row level security;
 alter table public.user_profiles       enable row level security;
 alter table public.chat_sessions       enable row level security;
+
+revoke all on public.ingestion_manifests from authenticated, anon;
 
 -- Tenant-scoped tables: read/write only your own client's rows.
 -- current_client_id() resolves from JWT claim (service-role) or
@@ -613,7 +794,12 @@ revoke execute on function public.increment_session_count(text) from public, ano
 -- Takes p_user_id and scopes the update to that owner so the service-role call
 -- (which bypasses RLS) still cannot archive another user's session.
 -- Returns true if a matching, still-active session was archived; false otherwise.
-create or replace function public.archive_session(p_session_id text, p_user_id uuid)
+drop function if exists public.archive_session(text, uuid);
+create or replace function public.archive_session(
+    p_session_id text,
+    p_user_id uuid,
+    p_client_id uuid
+)
 returns boolean
 language plpgsql
 security definer
@@ -627,13 +813,17 @@ begin
       updated_at = now()
   where session_id = p_session_id
     and user_id    = p_user_id
+    and client_id  = p_client_id
     and status     = 'active';
   get diagnostics v_count = row_count;
   return v_count > 0;
 end;
 $$;
 
-revoke execute on function public.archive_session(text, uuid) from public, anon, authenticated;
+revoke all on function public.archive_session(text, uuid, uuid)
+    from public, anon, authenticated;
+grant execute on function public.archive_session(text, uuid, uuid)
+    to service_role;
 
 
 -- ============================================================================
@@ -642,8 +832,11 @@ revoke execute on function public.archive_session(text, uuid) from public, anon,
 
 -- Hybrid semantic + lexical search over transcript chunks.
 -- Combines pgvector cosine similarity with full-text search via Reciprocal Rank Fusion.
--- security invoker = runs as caller; RLS enforces client isolation automatically.
+-- The orchestrator calls this RPC with the service-role key, which bypasses RLS.
+-- Keep an explicit client predicate in every CTE as the authorization boundary.
+drop function if exists public.hybrid_search_transcripts(text, vector, integer, integer, numeric);
 create or replace function public.hybrid_search_transcripts(
+    p_client_id        uuid,
     p_query_text       text,
     p_query_embedding  vector(1536),
     p_match_count      integer default 40,
@@ -671,7 +864,8 @@ with semantic as (
     select ts.segment_id,
            row_number() over (order by ts.embedding <=> p_query_embedding) as rnk
     from public.transcript_segments ts
-    where ts.embedding is not null
+    where ts.client_id = p_client_id
+      and ts.embedding is not null
       and (ts.end_seconds - ts.start_seconds) >= p_min_seconds
     order by ts.embedding <=> p_query_embedding
     limit p_match_count * 2
@@ -685,7 +879,8 @@ lexical as (
              ) desc
            ) as rnk
     from public.transcript_segments ts
-    where to_tsvector('english', ts.transcript_text)
+    where ts.client_id = p_client_id
+      and to_tsvector('english', ts.transcript_text)
           @@ websearch_to_tsquery('english', p_query_text)
     limit p_match_count * 2
 ),
@@ -709,16 +904,21 @@ select ts.segment_id,
        f.score
 from fused f
 join public.transcript_segments ts using (segment_id)
+where ts.client_id = p_client_id
 order by f.score desc
 limit p_match_count;
 $$;
 
-grant execute on function public.hybrid_search_transcripts(text, vector, integer, integer, numeric)
-    to authenticated;
+revoke all on function public.hybrid_search_transcripts(uuid, text, vector, integer, integer, numeric)
+    from public, anon, authenticated;
+grant execute on function public.hybrid_search_transcripts(uuid, text, vector, integer, integer, numeric)
+    to service_role;
 
 
 -- Hybrid search over video summaries — broad discovery ("which videos are about X").
+drop function if exists public.hybrid_search_summaries(text, vector, integer, integer);
 create or replace function public.hybrid_search_summaries(
+    p_client_id        uuid,
     p_query_text       text,
     p_query_embedding  vector(1536),
     p_match_count      integer default 20,
@@ -741,7 +941,8 @@ with semantic as (
     select vs.summary_id,
            row_number() over (order by vs.summary_embedding <=> p_query_embedding) as rnk
     from public.video_summaries vs
-    where vs.summary_embedding is not null
+    where vs.client_id = p_client_id
+      and vs.summary_embedding is not null
     order by vs.summary_embedding <=> p_query_embedding
     limit p_match_count * 2
 ),
@@ -754,7 +955,8 @@ lexical as (
              ) desc
            ) as rnk
     from public.video_summaries vs
-    where to_tsvector('english', vs.summary_text)
+    where vs.client_id = p_client_id
+      and to_tsvector('english', vs.summary_text)
           @@ websearch_to_tsquery('english', p_query_text)
     limit p_match_count * 2
 ),
@@ -774,17 +976,22 @@ select vs.summary_id,
        f.score
 from fused f
 join public.video_summaries vs using (summary_id)
+where vs.client_id = p_client_id
 order by f.score desc
 limit p_match_count;
 $$;
 
-grant execute on function public.hybrid_search_summaries(text, vector, integer, integer)
-    to authenticated;
+revoke all on function public.hybrid_search_summaries(uuid, text, vector, integer, integer)
+    from public, anon, authenticated;
+grant execute on function public.hybrid_search_summaries(uuid, text, vector, integer, integer)
+    to service_role;
 
 
 -- Semantic match over the asset catalog — used by the Director agent to find
 -- creative assets (characters, B-roll prompts, voices, etc.) matching a beat.
+drop function if exists public.match_assets(vector, text[], integer);
 create or replace function public.match_assets(
+    p_client_id      uuid,
     p_query_embedding vector(1536),
     p_asset_types     text[] default null,
     p_match_count     integer default 8
@@ -804,15 +1011,18 @@ as $$
   select ac.asset_id, ac.asset_type, ac.name, ac.description, ac.parameters,
          (1 - (ac.embedding <=> p_query_embedding))::numeric as similarity
   from public.asset_catalog ac
-  where ac.is_active = true
+  where ac.client_id = p_client_id
+    and ac.is_active = true
     and ac.embedding is not null
     and (p_asset_types is null or ac.asset_type = any(p_asset_types))
   order by ac.embedding <=> p_query_embedding
   limit p_match_count;
 $$;
 
-grant execute on function public.match_assets(vector, text[], integer)
-    to authenticated;
+revoke all on function public.match_assets(uuid, vector, text[], integer)
+    from public, anon, authenticated;
+grant execute on function public.match_assets(uuid, vector, text[], integer)
+    to service_role;
 
 
 -- ============================================================================

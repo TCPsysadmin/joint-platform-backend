@@ -9,6 +9,7 @@ from orchestrator.nodes import (
     analyze,
     chat_response,
     critique,
+    expand_clip,
     fetch_doctrine,
     fetch_source,
     post_stub,
@@ -24,12 +25,17 @@ from orchestrator.state import AgentState
 
 def _intent_router(state: AgentState) -> str:
     intent = state.get("intent")
+    if state.get("command") == "expand" and state.get("candidate_recommendation"):
+        return "expand"
     if intent == "chitchat":
         return "chitchat"
     # A follow-up that can reuse the existing chunks/transcript skips retrieval and
     # re-analyzes directly. Otherwise it falls through to the same retrieval path as
     # a new request (route_intent has already reset the loop state for it).
-    if intent == "follow_up" and state.get("follow_up_reuse"):
+    # Guard: only take the shortcut when there is genuinely something to reuse —
+    # analyze has no segments to work from otherwise and would fail the turn.
+    has_reusable_context = bool(state.get("retrieved_segments") or state.get("source_file_content"))
+    if intent == "follow_up" and state.get("follow_up_reuse") and has_reusable_context:
         return "reuse"
     if settings.require_brand_doctrine and state.get("brand_doctrine") is None:
         return "fetch_doctrine"
@@ -74,6 +80,7 @@ def build_graph(
     builder.add_node("fetch_source", fetch_source.run)
     builder.add_node("analyze", analyze.run)
     builder.add_node("critique", critique.run)
+    builder.add_node("expand_clip", expand_clip.run)
     builder.add_node("refine", refine.run)
     builder.add_node("recommend", recommend.run)
     builder.add_node("post_stub", post_stub.run)
@@ -87,13 +94,20 @@ def build_graph(
         _intent_router,
         {
             "chitchat": "chat_response",
-            "reuse": "analyze",
+            "expand": "expand_clip",
+            # Reuse enters at fetch_source, not analyze: retrieval is still
+            # skipped, but "dive deeper on clip 2" gets a chance to ingest that
+            # clip's source file if it isn't in context yet. fetch_source
+            # short-circuits when the right transcript is already there, and
+            # _fetch_source_router lands on analyze exactly as before.
+            "reuse": "fetch_source",
             "fetch_doctrine": "fetch_doctrine",
             "retrieve": "retrieve",
         },
     )
 
     builder.add_edge("chat_response", END)
+    builder.add_edge("expand_clip", "recommend")
     builder.add_edge("fetch_doctrine", "retrieve")
 
     builder.add_conditional_edges(

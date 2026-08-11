@@ -148,6 +148,10 @@ class SupabaseSearchTool:
         response = await self._supabase.rpc(
             "hybrid_search_transcripts",
             {
+                # This client uses the service-role key, which bypasses RLS.
+                # The RPC must therefore receive and enforce the tenant boundary
+                # explicitly instead of relying on current_client_id().
+                "p_client_id": str(self._client_id),
                 "p_query_text": query_text,
                 "p_query_embedding": query_embedding,
                 "p_match_count": match_count,
@@ -183,6 +187,8 @@ class SupabaseSearchTool:
         match_count: int = 8,
     ) -> list[AssetHit]:
         params: dict[str, Any] = {
+            # Service-role RPCs bypass RLS, so tenant scope is mandatory.
+            "p_client_id": str(self._client_id),
             "p_query_embedding": query_embedding,
             "p_match_count": match_count,
         }

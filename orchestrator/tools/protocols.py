@@ -98,6 +98,22 @@ class B2FileEntry:
 
 
 @dataclass
+class B2FetchedFile:
+    """Outcome of one file in a concurrent B2 fetch batch.
+
+    Deliberately distinguishes three results that would otherwise all collapse to
+    `None`: downloaded text (`content` set), a file that exists but isn't text
+    (`is_text` False), and a download that failed (`error` set). A missing
+    transcript sidecar must not read the same as a broken B2 call.
+    """
+
+    file_name: str
+    content: str | None = None
+    is_text: bool = False
+    error: str | None = None
+
+
+@dataclass
 class B2KeyInfo:
     application_key_id: str
     key_name: str
@@ -238,6 +254,13 @@ class FileTool(Protocol):
         self, source_video_id: str, *, valid_duration_seconds: int = 86400
     ) -> str | None: ...
 
+    async def get_path_download_urls(
+        self,
+        b2_paths: list[str],
+        *,
+        valid_duration_seconds: int = 86400,
+    ) -> dict[str, str]: ...
+
     async def list_buckets(
         self,
         *,
@@ -281,3 +304,12 @@ class FileTool(Protocol):
         bucket_name: str | None = None,
         prefix: str | None = None,
     ) -> B2FileEntry | None: ...
+
+    async def fetch_files(
+        self,
+        *,
+        paths: list[str],
+        bucket_name: str | None = None,
+    ) -> list[B2FetchedFile]: ...
+
+    async def fetch_source_bundle(self, source_video_id: str) -> list[B2FetchedFile]: ...

@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from supabase import AsyncClient, create_async_client
 
-from orchestrator import session_documents, session_manager
+from orchestrator import media_library, session_documents, session_manager
 from orchestrator.auth import (
     admin_create_auth_user,
     extract_bearer,
@@ -34,7 +34,7 @@ from orchestrator.graph import build_graph
 from orchestrator.observability import bind_request_context, configure_logging
 from orchestrator.runtime import RuntimeContext
 from orchestrator.sse_sanitize import compact_partial_state
-from orchestrator.supabase_json import as_dict
+from orchestrator.supabase_json import as_dict, as_dict_list
 from orchestrator.turn_stream import (
     Publisher,
     TurnAlreadyActiveError,
@@ -226,6 +226,12 @@ async def _run_chat_turn(
 ) -> None:
     graph = build_graph(checkpointer=checkpointer)
     thread_config = _thread_config(session_id, runtime)
+    # Only these three keys. Any key present here overwrites the checkpointed value
+    # for channels without a reducer, so everything the previous turn learned
+    # (retrieved_segments, candidate_clips, final_recommendation, brand_doctrine, …)
+    # must be left out and restored from the checkpoint. `messages` is safe because
+    # it uses the add_messages reducer (appends); `session_documents` is re-read from
+    # Postgres each turn and is authoritative.
     input_state: dict[str, Any] = {
         "messages": [HumanMessage(content=message)],
         "session_id": session_id,
@@ -371,6 +377,7 @@ async def chat(request: Request, body: ChatRequest) -> EventSourceResponse:
         svc,
         session_id=body.session_id,
         user_id=runtime.user_id,
+        client_id=runtime.client_id,
     )
 
     registry = _turn_streams(request)
@@ -513,14 +520,62 @@ async def upload_session_document(
     }
 
 
+@app.get("/sessions/{session_id}/documents")
+async def get_session_documents(session_id: str, request: Request) -> dict[str, Any]:
+    """List the documents currently attached to an authenticated user's session."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+
+    response = (
+        await svc.table("chat_sessions")
+        .select("user_id,client_id")
+        .eq("session_id", session_id)
+        .maybe_single()
+        .execute()
+    )
+    row = as_dict(response.data if response else None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if str(row["user_id"]) != str(user_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if str(row.get("client_id") or "") != str(client_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    documents = await session_documents.list_session_documents(
+        svc,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
+    )
+    return {
+        "session_id": session_id,
+        "documents": [
+            {
+                "doc_id": str(document.get("doc_id")),
+                "filename": document.get("filename"),
+                "content_type": document.get("content_type"),
+                "byte_size": document.get("byte_size"),
+                "char_count": document.get("char_count"),
+                "summary": document.get("summary"),
+                "status": "ready",
+                "created_at": document.get("created_at"),
+            }
+            for document in documents
+        ],
+    }
+
+
 @app.get("/sessions")
 async def list_sessions(request: Request) -> dict[str, Any]:
     """List the authenticated user's active sessions, newest first."""
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
 
-    sessions = await session_manager.list_sessions(svc, user_id)
+    sessions = await session_manager.list_sessions(svc, user_id, client_id)
     return {"sessions": sessions}
 
 
@@ -534,11 +589,12 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    runtime_client_id = await get_client_id(user_id, svc)
 
-    # Ownership check: verify the session belongs to this user.
+    # Ownership check: verify the session belongs to this user and tenant.
     response = (
         await svc.table("chat_sessions")
-        .select("user_id")
+        .select("user_id,client_id")
         .eq("session_id", session_id)
         .maybe_single()
         .execute()
@@ -548,9 +604,10 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
         raise HTTPException(status_code=404, detail="Session not found")
     if str(row["user_id"]) != str(user_id):
         raise HTTPException(status_code=403, detail="Forbidden")
+    if str(row.get("client_id") or "") != str(runtime_client_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     # Load message history from LangGraph checkpoint state.
-    runtime_client_id = await get_client_id(user_id, svc)
     graph = build_graph(checkpointer=request.app.state.checkpointer)
     thread_config = _thread_config(session_id)
 
@@ -580,11 +637,217 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
 
-    archived = await session_manager.archive_session(svc, session_id, user_id)
+    archived = await session_manager.archive_session(svc, session_id, user_id, client_id)
     if not archived:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"session_id": session_id, "status": "archived"}
+
+
+# ── Media library endpoints ───────────────────────────────────────────────────
+
+
+@app.get("/ingestion/config")
+async def get_ingestion_config(request: Request) -> dict[str, Any]:
+    """Return the signed-in tenant's configured ingestion destination."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+    response = (
+        await svc.table("clients_registry")
+        .select(
+            "client_id,display_name,drive_transcripts_intake_folder_id,"
+            "drive_summaries_intake_folder_id,"
+            "drive_transcripts_completed_folder_id,"
+            "drive_summaries_completed_folder_id"
+        )
+        .eq("client_id", str(client_id))
+        .maybe_single()
+        .execute()
+    )
+    row = as_dict(response.data if response is not None else None)
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Client ingestion configuration not found",
+        )
+
+    required = {
+        "transcripts_folder_id": row.get("drive_transcripts_intake_folder_id"),
+        "summaries_folder_id": row.get("drive_summaries_intake_folder_id"),
+        "transcripts_completed_folder_id": row.get("drive_transcripts_completed_folder_id"),
+        "summaries_completed_folder_id": row.get("drive_summaries_completed_folder_id"),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail="Client ingestion folders are incomplete: " + ", ".join(missing),
+        )
+
+    return {
+        "client_id": str(client_id),
+        "name": str(row.get("display_name") or "Workspace"),
+        **required,
+    }
+
+
+@app.get("/ingestion/destinations")
+async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
+    """List only the authenticated user's configured Drive destination."""
+    svc: AsyncClient = request.app.state.svc
+    token = extract_bearer(request)
+    user_id = await verify_token(token)
+    client_id = await get_client_id(user_id, svc)
+
+    response = (
+        await svc.table("clients_registry")
+        .select(
+            "client_id,display_name,drive_transcripts_intake_folder_id,"
+            "drive_summaries_intake_folder_id,"
+            "drive_transcripts_completed_folder_id,"
+            "drive_summaries_completed_folder_id"
+        )
+        .eq("client_id", str(client_id))
+        .eq("status", "active")
+        .order("display_name")
+        .execute()
+    )
+    destinations: list[dict[str, str]] = []
+    rows = as_dict_list(response.data if response is not None else None)
+    for row in rows:
+        # Defense in depth for this service-role query: never serialize a row
+        # outside the authenticated tenant even if the upstream filter changes.
+        if str(row.get("client_id") or "") != str(client_id):
+            continue
+        destination = {
+            "client_id": str(row.get("client_id") or ""),
+            "name": str(row.get("display_name") or "Workspace"),
+            "transcripts_folder_id": str(row.get("drive_transcripts_intake_folder_id") or ""),
+            "summaries_folder_id": str(row.get("drive_summaries_intake_folder_id") or ""),
+            "transcripts_completed_folder_id": str(
+                row.get("drive_transcripts_completed_folder_id") or ""
+            ),
+            "summaries_completed_folder_id": str(
+                row.get("drive_summaries_completed_folder_id") or ""
+            ),
+        }
+        if all(destination.values()):
+            destinations.append(destination)
+
+    return {"destinations": destinations}
+
+
+@app.get("/media")
+async def list_media(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List the authenticated tenant's videos as Drive-style folder cards."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be non-negative")
+
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+    items = await media_library.list_videos(
+        svc,
+        client_id=runtime.client_id,
+        limit=limit,
+        offset=offset,
+    )
+    await _attach_signed_thumbnail_urls(runtime, items)
+    return {
+        "items": items,
+        "count": len(items),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/media/{source_video_id}")
+async def get_media(source_video_id: str, request: Request) -> dict[str, Any]:
+    """Open one video folder, including its summary and full transcript."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+    item = await media_library.get_video(
+        svc,
+        client_id=runtime.client_id,
+        source_video_id=source_video_id,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _attach_signed_thumbnail_urls(runtime, [item])
+    return item
+
+
+async def _attach_signed_thumbnail_urls(
+    runtime: RuntimeContext,
+    items: list[dict[str, Any]],
+) -> None:
+    """Fill private thumbnail URLs without exposing B2 credentials or bucket paths."""
+    paths = [
+        str(thumbnail["b2_path"])
+        for item in items
+        if isinstance((thumbnail := item.get("thumbnail")), dict)
+        and not thumbnail.get("url")
+        and thumbnail.get("b2_path")
+    ]
+    if not paths:
+        return
+    try:
+        signed = await runtime.file_tool.get_path_download_urls(
+            paths,
+            valid_duration_seconds=settings.b2_download_url_ttl_seconds,
+        )
+    except Exception:
+        logger.exception(
+            "media_thumbnail_signing_failed",
+            client_id=str(runtime.client_id),
+        )
+        return
+    for item in items:
+        thumbnail = item.get("thumbnail")
+        if not isinstance(thumbnail, dict) or thumbnail.get("url"):
+            continue
+        path = str(thumbnail.get("b2_path") or "")
+        if path in signed:
+            thumbnail["url"] = signed[path]
+
+
+@app.get("/media/{source_video_id}/video-url")
+async def get_media_video_url(source_video_id: str, request: Request) -> dict[str, Any]:
+    """Return a short-lived B2 URL for downloading one tenant-owned source video."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+
+    # Verify the media record belongs to this tenant before resolving storage.
+    item = await media_library.get_video(
+        svc,
+        client_id=runtime.client_id,
+        source_video_id=source_video_id,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    url = await runtime.file_tool.get_download_url(
+        source_video_id,
+        valid_duration_seconds=settings.b2_download_url_ttl_seconds,
+    )
+    if not url:
+        raise HTTPException(status_code=404, detail="Video file is not available")
+
+    raw_video = item.get("video")
+    video = raw_video if isinstance(raw_video, dict) else {}
+    return {
+        "url": url,
+        "filename": video.get("source_file"),
+        "expires_in": settings.b2_download_url_ttl_seconds,
+    }
 
 
 # ── Admin endpoints ────────────────────────────────────────────────────────────

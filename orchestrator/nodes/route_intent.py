@@ -8,7 +8,11 @@ from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from orchestrator.config import settings
-from orchestrator.context import build_context_window
+from orchestrator.context import (
+    build_context_window,
+    build_prior_context_summary,
+    references_prior_clip,
+)
 from orchestrator.errors import LLMError
 from orchestrator.llm_json import parse_llm_json
 from orchestrator.prompts import load_prompt
@@ -44,6 +48,10 @@ _SOURCE_ANSWER_RE = re.compile(
     r"what\s+does\s+(?:this|it|that)\s+(?:cover|say)"
     r")\b",
     re.IGNORECASE | re.DOTALL,
+)
+_EXPAND_COMMAND_RE = re.compile(
+    r"^\s*/?expand(?:\s+(?:by\s+)?(?P<seconds>\d{1,3})(?:\s*(?:s|sec|secs|seconds?))?)?\s*[.!]?\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -110,8 +118,39 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     runtime: RuntimeContext = config["configurable"]["runtime"]
     prompt = load_prompt("route_intent.md")
 
+    latest_text = _latest_message_text(state["messages"])
+    expand_match = _EXPAND_COMMAND_RE.match(latest_text)
+    if expand_match and state.get("candidate_recommendation"):
+        increment = int(expand_match.group("seconds") or 15)
+        increment = max(1, min(increment, 300))
+        total = int(state.get("expand_seconds") or 0) + increment
+        logger.info(
+            "expand_command_routed",
+            increment_seconds=increment,
+            total_seconds=total,
+            session_id=state.get("session_id"),
+        )
+        return {
+            "intent": "follow_up",
+            "follow_up_reuse": True,
+            "command": "expand",
+            "expand_seconds": total,
+            "user_query": (
+                f"Expand the previously recommended clip by {increment} seconds before and after."
+            ),
+            "awaiting_confirmation": False,
+            "confirmation_response": None,
+            "final_recommendation": None,
+        }
+
     windowed = build_context_window(state["messages"], settings.context_window_messages)
+    # Message text alone can't tell the classifier that clips are sitting in state
+    # waiting to be referred to ("the second one"). Hand it an inventory of what's
+    # already in memory — appended to the same call, so this stays one LLM round-trip.
+    prior_context = build_prior_context_summary(dict(state))
     messages = [SystemMessage(content=prompt), *windowed]
+    if prior_context:
+        messages.append(SystemMessage(content=prior_context))
 
     response = await runtime.llm.ainvoke(messages)
     data: dict[str, Any] = parse_llm_json(str(response.content), source="route_intent")
@@ -120,7 +159,6 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     if intent not in ("new_request", "follow_up", "chitchat"):
         raise LLMError(f"route_intent returned unknown intent: {intent!r}")
 
-    latest_text = _latest_message_text(state["messages"])
     detected_source_reference = _detect_source_reference(latest_text)
 
     # The model decides — in this same call — whether a follow-up can reuse the
@@ -142,6 +180,28 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         intent = "new_request"
         reuse_context = False
 
+    # Deterministic rescue for "dive deeper on clip 2" / "the second option" style
+    # messages. Any label other than follow_up-with-reuse resets the clips the user
+    # is pointing at, so a misclassification here reads to the creator as amnesia.
+    # Deliberately narrow: it needs an explicit clip reference (index/ordinal/
+    # demonstrative), clips actually in context, and no *new* source named. Must run
+    # before the source-reset block below, which would otherwise null out
+    # source_video_id / source_metadata.
+    has_prior_clip_context = bool(state.get("candidate_clips") or state.get("final_recommendation"))
+    if (
+        not (intent == "follow_up" and reuse_context)
+        and has_prior_clip_context
+        and not source_reference
+        and references_prior_clip(latest_text)
+    ):
+        logger.info(
+            "intent_override_prior_clip_reference",
+            original_intent=intent,
+            session_id=state.get("session_id"),
+        )
+        intent = "follow_up"
+        reuse_context = True
+
     logger.info(
         "intent_routed",
         intent=intent,
@@ -154,6 +214,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     base: dict[str, Any] = {
         "intent": intent,
         "follow_up_reuse": reuse_context,
+        "command": None,
         "user_query": _clean_user_query(data.get("user_query"), fallback=latest_text)
         if intent != "chitchat"
         else None,
@@ -175,11 +236,13 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         base.update(
             {
                 "refined_query": None,
+                "expand_seconds": 0,
                 "iteration_count": 0,
                 "previous_segment_ids": [],
                 "retrieved_segments": [],
                 "brand_doctrine": None,
                 "source_file_content": None,
+                "source_content_video_id": None,
                 "candidate_clips": [],
                 "candidate_recommendation": None,
                 "critique_result": None,
@@ -190,8 +253,15 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         )
     elif intent == "follow_up" and not reuse_context:
         # Fresh retrieval for the follow-up: reset the retrieval/critique loop so
-        # staleness and iteration-cap checks don't misfire on the new query.
+        # staleness and iteration-cap checks don't misfire on the new query, and drop
+        # the cached transcript (the new retrieval may land on a different video —
+        # fetch_source short-circuits when source_file_content is already set).
         # Brand doctrine is preserved — it doesn't change within a session.
+        #
+        # candidate_clips / candidate_recommendation / final_recommendation are NOT
+        # cleared: they are the previous turn's answer, and analyze/recommend read
+        # them as `previous_clips` / `previous_recommendation` before overwriting
+        # them. Clearing them here is what made follow-ups forget the suggestions.
         base.update(
             {
                 "refined_query": None,
@@ -199,10 +269,8 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "previous_segment_ids": [],
                 "retrieved_segments": [],
                 "source_file_content": None,
-                "candidate_clips": [],
-                "candidate_recommendation": None,
+                "source_content_video_id": None,
                 "critique_result": None,
-                "final_recommendation": None,
                 "awaiting_confirmation": False,
                 "confirmation_response": None,
             }
@@ -211,17 +279,23 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         # Reuse existing chunks + transcript, but re-reason from scratch against the
         # new instruction: clear the critique loop and force a fresh candidate.
         # refined_query is cleared so analyze keys off the new user_query.
-        base.update(
-            {
-                "refined_query": None,
-                "iteration_count": 0,
-                "candidate_clips": [],
-                "candidate_recommendation": None,
-                "critique_result": None,
-                "final_recommendation": None,
-                "awaiting_confirmation": False,
-                "confirmation_response": None,
-            }
-        )
+        # The previous clips/recommendation stay in state so analyze can resolve
+        # references like "clip 2" against what was actually shown.
+        reuse_patch: dict[str, Any] = {
+            "refined_query": None,
+            "iteration_count": 0,
+            "critique_result": None,
+            "awaiting_confirmation": False,
+            "confirmation_response": None,
+        }
+        # Pointing at a clip is a clip request, not a question about the source.
+        # source_task survives follow-ups untouched, and the reuse path now enters
+        # at fetch_source — whose router sends source_task="source_answer" to the
+        # source_answer node. Without this, "dive deeper on clip 2" landing in a
+        # session that earlier asked "what is this video about?" would be answered
+        # as another source summary instead of a clip analysis.
+        if not source_reference and references_prior_clip(latest_text):
+            reuse_patch["source_task"] = None
+        base.update(reuse_patch)
 
     return base

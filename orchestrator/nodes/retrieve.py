@@ -82,6 +82,41 @@ def _source_reference_candidates(value: str) -> list[str]:
     return candidates
 
 
+def _normalized_source_key(value: str) -> str:
+    decoded = unquote(value).lower()
+    basename = posixpath.basename(decoded.replace("\\", "/"))
+    without_extension = _without_extension(basename)
+    return re.sub(r"[^a-z0-9]+", "", without_extension)
+
+
+def _find_session_document(
+    documents: list[dict[str, object]],
+    source_reference: str,
+) -> dict[str, object] | None:
+    generic_reference = re.sub(r"[^a-z]+", "", source_reference.lower())
+    if len(documents) == 1 and re.fullmatch(
+        r"(?:the|my|this)?(?:attached|uploaded)?(?:file|document|attachment|upload)",
+        generic_reference,
+    ):
+        return documents[0]
+
+    reference_keys = {
+        key
+        for candidate in _source_reference_candidates(source_reference)
+        if (key := _normalized_source_key(candidate))
+    }
+    for document in documents:
+        filename = str(document.get("filename") or "")
+        document_key = _normalized_source_key(filename)
+        if not document_key:
+            continue
+        if document_key in reference_keys or any(
+            len(document_key) >= 6 and document_key in key for key in reference_keys
+        ):
+            return document
+    return None
+
+
 async def _find_b2_source_file(
     runtime: RuntimeContext,
     source_reference: str,
@@ -171,6 +206,52 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         source_patch: dict[str, Any] = {}
 
         if not source_video_id:
+            session_document = _find_session_document(
+                list(state.get("session_documents") or []),
+                source_reference,
+            )
+            if session_document is not None:
+                content = str(
+                    session_document.get("content_text") or session_document.get("summary") or ""
+                ).strip()
+                filename = str(session_document.get("filename") or source_reference)
+                document_id = str(session_document.get("doc_id") or filename)
+                attachment_id = f"attachment:{document_id}"
+                segment = {
+                    "segment_id": f"{attachment_id}:full",
+                    "video_id": attachment_id,
+                    "text": content,
+                    "start_seconds": 0.0,
+                    "end_seconds": 0.0,
+                    "has_timestamps": False,
+                    "score": 1.0,
+                    "metadata": {
+                        "source_file": filename,
+                        "session_attachment": True,
+                    },
+                }
+                logger.info(
+                    "source_reference_resolved_from_session_document",
+                    source_reference=source_reference,
+                    filename=filename,
+                    session_id=state.get("session_id"),
+                )
+                return {
+                    **doctrine_patch,
+                    "source_video_id": attachment_id,
+                    "source_metadata": {
+                        "source_video_id": attachment_id,
+                        "title": _without_extension(filename),
+                        "source_file": filename,
+                        "has_timestamps": False,
+                        "metadata": {"session_attachment": True},
+                    },
+                    "source_resolution_error": None,
+                    "source_file_content": content,
+                    "retrieved_segments": [segment],
+                    "previous_segment_ids": [segment["segment_id"]],
+                }
+
             try:
                 source, b2_entry, b2_source_content = await _resolve_source_video(
                     runtime,
@@ -222,6 +303,7 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                         **doctrine_patch,
                         **source_patch,
                         "source_file_content": b2_source_content,
+                        "source_content_video_id": source_video_id,
                         "retrieved_segments": [segment],
                         "previous_segment_ids": [segment["segment_id"]],
                     }

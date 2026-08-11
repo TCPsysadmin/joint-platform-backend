@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from orchestrator.nodes.retrieve import _find_session_document
 from orchestrator.tools.local.supabase_search import (
     SupabaseSearchTool,
     _source_match_score,
@@ -129,6 +130,31 @@ def test_source_match_score_treats_title_and_file_stem_as_exact_match() -> None:
     )
 
     assert score[0] == 100
+
+
+def test_attached_document_matches_separator_and_extension_variants() -> None:
+    document = {
+        "doc_id": "doc-1",
+        "filename": "TCP003_MEETINGS_20250113 - 5 PART TCP INTRO RAW_transcript.txt",
+        "content_text": "Attached transcript content",
+    }
+
+    matched = _find_session_document(
+        [document],
+        "TCP003 MEETINGS 20250113 5 PART TCP INTRO RAW transcript",
+    )
+
+    assert matched is document
+
+
+def test_single_attached_document_matches_generic_reference() -> None:
+    document = {
+        "doc_id": "doc-1",
+        "filename": "campaign-brief.pdf",
+        "content_text": "Attached brief content",
+    }
+
+    assert _find_session_document([document], "the attached file") is document
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,10 @@ class AgentState(TypedDict):
     # For follow_up only: True if the existing retrieved chunks + transcript can
     # answer the follow-up (cheap re-analysis), False if a fresh retrieval is needed.
     follow_up_reuse: bool
+    # Optional deterministic follow-up command. EXPAND extends the previously
+    # recommended clip without running a new semantic search.
+    command: Literal["expand"] | None
+    expand_seconds: int
     user_query: str | None
     # Optional user-specified video/file reference. When present, retrieval is
     # constrained to the resolved source instead of searching across all chunks.
@@ -30,6 +34,11 @@ class AgentState(TypedDict):
     retrieved_segments: list[dict[str, object]]
     brand_doctrine: dict[str, object] | None
     source_file_content: str | None
+    # Which source `source_file_content` was ingested for. Lets fetch_source tell
+    # "already have this transcript" from "have a different video's transcript",
+    # so "dive deeper on clip 2" can pull clip 2's source when it is not in yet.
+    # None means unknown provenance (legacy checkpoint) — treated as a match.
+    source_content_video_id: str | None
     # Ranked list of clip candidates surfaced by analyze (best-first). The primary
     # (candidate_clips[0]) is mirrored into candidate_recommendation for critique/post.
     candidate_clips: list[dict[str, object]]

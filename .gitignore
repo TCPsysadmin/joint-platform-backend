@@ -49,3 +49,6 @@ logs/
 # LangGraph checkpoints (local dev sqlite)
 *.db
 *.sqlite3
+
+# Backblaze B2 file-index cache (see orchestrator/tools/local/b2_legend.py)
+.b2_legend/

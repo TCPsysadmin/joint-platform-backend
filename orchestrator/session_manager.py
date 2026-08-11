@@ -39,7 +39,7 @@ async def get_or_create_session(
     """
     response = (
         await svc.table("chat_sessions")
-        .select("user_id, title, message_count")
+        .select("user_id, client_id, title, message_count")
         .eq("session_id", session_id)
         .maybe_single()
         .execute()
@@ -70,6 +70,8 @@ async def get_or_create_session(
     existing_uid = str(row["user_id"])
     if existing_uid != str(user_id):
         raise AuthError(f"Session {session_id!r} belongs to a different user")
+    if str(row.get("client_id") or "") != str(client_id):
+        raise AuthError(f"Session {session_id!r} belongs to a different client")
 
     # The session was pre-created (e.g. POST /sessions) before the first message.
     # If it's still untitled and no turns have happened, claim the title from the
@@ -98,12 +100,17 @@ async def touch_session(svc: AsyncClient, session_id: str) -> None:
     logger.debug("session_touched", session_id=session_id)
 
 
-async def list_sessions(svc: AsyncClient, user_id: UUID) -> list[JsonDict]:
+async def list_sessions(
+    svc: AsyncClient,
+    user_id: UUID,
+    client_id: UUID,
+) -> list[JsonDict]:
     """Return active sessions for a user, newest first (max 50)."""
     response = (
         await svc.table("chat_sessions")
         .select("session_id, title, message_count, last_message_at, status, created_at")
         .eq("user_id", str(user_id))
+        .eq("client_id", str(client_id))
         .eq("status", "active")
         .order("last_message_at", desc=True)
         .limit(50)
@@ -112,7 +119,12 @@ async def list_sessions(svc: AsyncClient, user_id: UUID) -> list[JsonDict]:
     return as_dict_list(response.data if response else None)
 
 
-async def archive_session(svc: AsyncClient, session_id: str, user_id: UUID) -> bool:
+async def archive_session(
+    svc: AsyncClient,
+    session_id: str,
+    user_id: UUID,
+    client_id: UUID,
+) -> bool:
     """Soft-delete a session by flipping its status to 'archived'.
 
     Archived sessions are excluded from list_sessions, so they drop out of the
@@ -125,7 +137,11 @@ async def archive_session(svc: AsyncClient, session_id: str, user_id: UUID) -> b
     """
     response = await svc.rpc(
         "archive_session",
-        {"p_session_id": session_id, "p_user_id": str(user_id)},
+        {
+            "p_session_id": session_id,
+            "p_user_id": str(user_id),
+            "p_client_id": str(client_id),
+        },
     ).execute()
     archived = bool(response.data)
     logger.info(

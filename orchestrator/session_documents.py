@@ -230,6 +230,7 @@ async def list_session_documents(
     *,
     session_id: str,
     user_id: UUID,
+    client_id: UUID,
     max_docs: int | None = None,
 ) -> list[JsonDict]:
     response = (
@@ -240,6 +241,7 @@ async def list_session_documents(
         )
         .eq("session_id", session_id)
         .eq("user_id", str(user_id))
+        .eq("client_id", str(client_id))
         .eq("status", "ready")
         .order("created_at", desc=True)
         .limit(max_docs or settings.session_document_max_count)

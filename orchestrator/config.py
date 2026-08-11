@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     # source video directly. Must outlast OpusClip's download/queue window.
     # Max 604800 (B2's 7-day cap). Default 24h.
     b2_download_url_ttl_seconds: int = 86400
+    # "Legend" = local JSON index of a tenant's B2 bucket (normalized basename →
+    # full path), so resolving a file is a dict lookup instead of paginating the
+    # bucket on every request. See orchestrator/tools/local/b2_legend.py.
+    b2_legend_cache_dir: str = ".b2_legend"
+    b2_legend_ttl_seconds: int = 900  # rebuild the index when older than 15 min
+    # Floor between miss-triggered rebuilds: without it, asking for a file that
+    # does not exist would re-sweep the whole bucket every turn.
+    b2_legend_min_refresh_seconds: int = 60
+    # Fan-out width when fetching a source file + its transcript sidecars.
+    # B2's default account limit is 500 req/s, so this is deliberately modest.
+    b2_fetch_concurrency: int = 6
 
     max_critique_iterations: int = 3
     embedding_model: str = "text-embedding-3-small"  # OpenAI embeddings (see note above)
@@ -44,6 +55,14 @@ class Settings(BaseSettings):
     session_document_max_upload_bytes: int = 2_000_000
     session_document_context_chars: int = 12_000
     session_document_max_count: int = 5
+    # Cap on the transcript text handed to analyze/source_answer. A "dive deeper"
+    # turn can pull a source file plus its sidecars; without a cap one long
+    # transcript blows the prompt budget.
+    # 200k chars ~= 50k tokens, comfortably inside grok-4.3's window and enough
+    # for the longest transcript in the corpus (184k). At 60k the cap silently
+    # cut 36% of transcripts mid-sentence, which is the opposite of what a
+    # "dive deeper" turn is for. Lower it if prompt cost matters more than recall.
+    source_file_content_max_chars: int = 200_000
     # Target clip length(s) Opus aims for when curating a full-file project (seconds).
     opus_default_clip_seconds: int = 60
     # Comma-separated list of allowed CORS origins. Use "*" for dev/testing.
