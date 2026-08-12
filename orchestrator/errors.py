@@ -9,6 +9,10 @@ class RetrievalError(AgentError):
     """Raised when transcript or asset retrieval fails."""
 
 
+class AmbiguousSourceError(RetrievalError):
+    """Raised when a filename identifies multiple videos equally well."""
+
+
 class LLMError(AgentError):
     """Raised when an LLM call fails or returns unparseable output."""
 

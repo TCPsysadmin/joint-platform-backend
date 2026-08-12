@@ -11,7 +11,7 @@ from langchain_core.runnables import RunnableConfig
 
 from orchestrator.config import settings
 from orchestrator.doctrine_defaults import default_brand_doctrine_dict
-from orchestrator.errors import RetrievalError
+from orchestrator.errors import AmbiguousSourceError, RetrievalError
 from orchestrator.runtime import RuntimeContext
 from orchestrator.state import AgentState
 from orchestrator.tools.protocols import B2FileEntry, SourceVideo
@@ -257,6 +257,15 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                     runtime,
                     source_reference,
                 )
+            except AmbiguousSourceError as exc:
+                return {
+                    **doctrine_patch,
+                    "source_video_id": None,
+                    "source_metadata": None,
+                    "source_resolution_error": str(exc),
+                    "retrieved_segments": [],
+                    "previous_segment_ids": [],
+                }
             except Exception as exc:
                 raise RetrievalError(
                     f"Source lookup failed for {source_reference!r}: {exc}"
@@ -407,6 +416,17 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "forced": True,
                 "note": _FORCED_NOTE,
             },
+        }
+
+    if not segments:
+        return {
+            **doctrine_patch,
+            "source_resolution_error": (
+                "I couldn't find any indexed transcript content for that request yet. "
+                "If the video was just ingested, wait for ingestion to finish and try again."
+            ),
+            "retrieved_segments": [],
+            "previous_segment_ids": [],
         }
 
     return {

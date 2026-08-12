@@ -132,7 +132,13 @@ async def run(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         session_id=state.get("session_id"),
     )
 
-    return {
+    patch: dict[str, Any] = {
         "source_file_content": content,
         "source_content_video_id": source_video_id if content else None,
     }
+    if state.get("source_reference") and not content and not state.get("retrieved_segments"):
+        patch["source_resolution_error"] = (
+            f"I found '{state.get('source_reference')}', but its transcript is not indexed "
+            "yet. If it was just ingested, wait for ingestion to finish and try again."
+        )
+    return patch
