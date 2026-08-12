@@ -12,7 +12,7 @@ from fastapi import UploadFile
 from supabase import AsyncClient
 
 from orchestrator.config import settings
-from orchestrator.supabase_json import JsonDict, as_dict_list
+from orchestrator.supabase_json import JsonDict, as_dict, as_dict_list
 
 _CHUNK_SIZE = 1024 * 1024
 _SUMMARY_CHARS = 500
@@ -204,6 +204,16 @@ async def create_session_document(
     client_id: UUID,
     document: ProcessedDocument,
 ) -> JsonDict:
+    existing = await _find_existing_session_document(
+        svc,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
+        sha256=document.sha256,
+    )
+    if existing is not None:
+        return existing
+
     payload: dict[str, Any] = {
         "session_id": session_id,
         "user_id": str(user_id),
@@ -218,11 +228,51 @@ async def create_session_document(
         "metadata": document.metadata,
         "status": "ready",
     }
-    response = await svc.table("chat_session_documents").insert(payload).execute()
+    try:
+        response = await svc.table("chat_session_documents").insert(payload).execute()
+    except Exception:  # noqa: BLE001 - retry lookup handles a concurrent identical upload
+        # The database unique index is the final concurrency guard. If another
+        # request inserted these exact bytes after our first lookup, treat this
+        # request as idempotent success; otherwise preserve the real insert error.
+        existing = await _find_existing_session_document(
+            svc,
+            session_id=session_id,
+            user_id=user_id,
+            client_id=client_id,
+            sha256=document.sha256,
+        )
+        if existing is not None:
+            return existing
+        raise
     rows = as_dict_list(response.data if response else None)
     if not rows:
         raise RuntimeError("Failed to persist uploaded session document")
     return rows[0]
+
+
+async def _find_existing_session_document(
+    svc: AsyncClient,
+    *,
+    session_id: str,
+    user_id: UUID,
+    client_id: UUID,
+    sha256: str,
+) -> JsonDict | None:
+    response = (
+        await svc.table("chat_session_documents")
+        .select(
+            "doc_id, session_id, filename, content_type, byte_size, char_count, "
+            "sha256, summary, metadata, status, created_at"
+        )
+        .eq("session_id", session_id)
+        .eq("user_id", str(user_id))
+        .eq("client_id", str(client_id))
+        .eq("sha256", sha256)
+        .eq("status", "ready")
+        .maybe_single()
+        .execute()
+    )
+    return as_dict(response.data if response else None)
 
 
 async def list_session_documents(

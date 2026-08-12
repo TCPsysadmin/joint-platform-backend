@@ -510,11 +510,11 @@ async def upload_session_document(
     return {
         "doc_id": str(row.get("doc_id")),
         "session_id": session_id,
-        "filename": processed.filename,
-        "content_type": processed.content_type,
-        "byte_size": processed.byte_size,
-        "char_count": processed.char_count,
-        "summary": processed.summary,
+        "filename": row.get("filename") or processed.filename,
+        "content_type": row.get("content_type") or processed.content_type,
+        "byte_size": row.get("byte_size") or processed.byte_size,
+        "char_count": row.get("char_count") or processed.char_count,
+        "summary": row.get("summary") or processed.summary,
         "status": row.get("status", "ready"),
         "created_at": row.get("created_at"),
     }
