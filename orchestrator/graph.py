@@ -53,6 +53,8 @@ def _retrieve_router(state: AgentState) -> str:
 
 
 def _fetch_source_router(state: AgentState) -> str:
+    if state.get("source_resolution_error"):
+        return "source_not_found"
     if state.get("source_task") == "source_answer":
         return "source_answer"
     return "analyze"
@@ -124,7 +126,11 @@ def build_graph(
     builder.add_conditional_edges(
         "fetch_source",
         _fetch_source_router,
-        {"source_answer": "source_answer", "analyze": "analyze"},
+        {
+            "source_not_found": "source_not_found",
+            "source_answer": "source_answer",
+            "analyze": "analyze",
+        },
     )
     builder.add_edge("source_answer", END)
     builder.add_edge("analyze", "critique")

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from supabase import AsyncClient
 
+from orchestrator.errors import AmbiguousSourceError
 from orchestrator.supabase_json import as_dict_list
 from orchestrator.tools.protocols import AssetHit, SourceVideo, TranscriptHit
 
@@ -103,11 +104,43 @@ class SupabaseSearchTool:
         if not rows_by_id:
             return None
 
+        # Exact stable identifiers are always safe, even when two human-facing
+        # filenames happen to normalize to the same text.
+        exact_ids = {
+            str(row["source_video_id"]): row
+            for row in rows_by_id.values()
+            if str(row.get("source_video_id") or "") in variants
+        }
+        if len(exact_ids) == 1:
+            return _source_video_from_row(next(iter(exact_ids.values())))
+
+        decoded_variants = {unquote(variant).strip().strip("/") for variant in variants}
+        exact_paths = {
+            str(row["source_video_id"]): row
+            for row in rows_by_id.values()
+            if unquote(str(row.get("b2_path") or "")).strip().strip("/") in decoded_variants
+        }
+        if len(exact_paths) == 1:
+            return _source_video_from_row(next(iter(exact_paths.values())))
+
         ref_norms = [_normalize_source_text(v) for v in variants]
-        best = max(
-            rows_by_id.values(),
-            key=lambda row: _source_match_score(row, ref_norms),
-        )
+        ranked = [(_source_match_score(row, ref_norms), row) for row in rows_by_id.values()]
+        best_score = max(score for score, _ in ranked)
+        if best_score[0] == 0:
+            return None
+        best_rows = [row for score, row in ranked if score == best_score]
+        if len(best_rows) > 1 and best_score[0] > 0:
+            labels = sorted(
+                f"{row.get('source_file') or row.get('title') or 'Untitled'} "
+                f"(source ID: {row['source_video_id']})"
+                for row in best_rows
+            )
+            raise AmbiguousSourceError(
+                "Multiple videos match that filename. Use the exact source video ID or "
+                "full B2 object path to choose one: " + ", ".join(labels[:5])
+            )
+
+        best = best_rows[0]
         return _source_video_from_row(best)
 
     async def list_transcript_segments_for_video(
