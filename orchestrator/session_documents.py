@@ -203,16 +203,18 @@ async def create_session_document(
     user_id: UUID,
     client_id: UUID,
     document: ProcessedDocument,
+    upload_request_id: str | None = None,
 ) -> JsonDict:
-    existing = await _find_existing_session_document(
-        svc,
-        session_id=session_id,
-        user_id=user_id,
-        client_id=client_id,
-        sha256=document.sha256,
-    )
-    if existing is not None:
-        return existing
+    if upload_request_id:
+        existing = await _find_existing_session_document(
+            svc,
+            session_id=session_id,
+            user_id=user_id,
+            client_id=client_id,
+            upload_request_id=upload_request_id,
+        )
+        if existing is not None:
+            return existing
 
     payload: dict[str, Any] = {
         "session_id": session_id,
@@ -228,21 +230,24 @@ async def create_session_document(
         "metadata": document.metadata,
         "status": "ready",
     }
+    if upload_request_id:
+        payload["upload_request_id"] = upload_request_id
     try:
         response = await svc.table("chat_session_documents").insert(payload).execute()
     except Exception:  # noqa: BLE001 - retry lookup handles a concurrent identical upload
-        # The database unique index is the final concurrency guard. If another
-        # request inserted these exact bytes after our first lookup, treat this
-        # request as idempotent success; otherwise preserve the real insert error.
-        existing = await _find_existing_session_document(
-            svc,
-            session_id=session_id,
-            user_id=user_id,
-            client_id=client_id,
-            sha256=document.sha256,
-        )
-        if existing is not None:
-            return existing
+        # The database unique index is the final concurrency guard. If this
+        # request was committed after our first lookup but its response was
+        # lost, treat the retry as success; otherwise preserve the insert error.
+        if upload_request_id:
+            existing = await _find_existing_session_document(
+                svc,
+                session_id=session_id,
+                user_id=user_id,
+                client_id=client_id,
+                upload_request_id=upload_request_id,
+            )
+            if existing is not None:
+                return existing
         raise
     rows = as_dict_list(response.data if response else None)
     if not rows:
@@ -256,19 +261,18 @@ async def _find_existing_session_document(
     session_id: str,
     user_id: UUID,
     client_id: UUID,
-    sha256: str,
+    upload_request_id: str,
 ) -> JsonDict | None:
     response = (
         await svc.table("chat_session_documents")
         .select(
             "doc_id, session_id, filename, content_type, byte_size, char_count, "
-            "sha256, summary, metadata, status, created_at"
+            "sha256, summary, metadata, status, created_at, upload_request_id"
         )
         .eq("session_id", session_id)
         .eq("user_id", str(user_id))
         .eq("client_id", str(client_id))
-        .eq("sha256", sha256)
-        .eq("status", "ready")
+        .eq("upload_request_id", upload_request_id)
         .maybe_single()
         .execute()
     )

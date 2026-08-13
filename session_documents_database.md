@@ -15,6 +15,7 @@ create table if not exists public.chat_session_documents (
     byte_size    integer not null,
     char_count   integer not null,
     sha256       text not null,
+    upload_request_id text,
     content_text text not null,
     summary      text,
     metadata     jsonb not null default '{}'::jsonb,
@@ -37,6 +38,10 @@ create index if not exists chat_session_documents_user_idx
 
 create index if not exists chat_session_documents_client_idx
     on public.chat_session_documents (client_id);
+
+create unique index if not exists chat_session_documents_session_request_uidx
+    on public.chat_session_documents (session_id, upload_request_id)
+    where upload_request_id is not null;
 
 create index if not exists chat_session_documents_text_fts_idx
     on public.chat_session_documents
@@ -100,7 +105,10 @@ The endpoint stores extracted text from `.pdf`, `.docx`, and UTF-8 text-like fil
 
 - `content_text`: normalized extracted text used as agent context.
 - `summary`: a short first-pass summary/excerpt for UI and quick inspection.
-- `sha256`: hash of the original uploaded bytes for deduplication or audit.
+- `sha256`: hash of the original uploaded bytes for integrity checks and audits.
+- `upload_request_id`: optional frontend-generated idempotency key. Retrying one
+  upload reuses the row, while intentionally attaching identical bytes again
+  with a new key creates a new row.
 - `metadata`: currently includes the file extension, detected document kind, and extraction method.
 - `status`: currently written as `ready`.
 
