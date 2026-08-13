@@ -6,10 +6,10 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -475,6 +475,7 @@ async def upload_session_document(
     session_id: str,
     request: Request,
     file: UploadFile = _DOCUMENT_UPLOAD,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)] = None,
 ) -> dict[str, Any]:
     """Upload a text-like document and attach it as session-scoped agent context."""
     svc: AsyncClient = request.app.state.svc
@@ -496,6 +497,7 @@ async def upload_session_document(
         user_id=user_id,
         client_id=client_id,
         document=processed,
+        upload_request_id=idempotency_key,
     )
 
     logger.info(
@@ -510,11 +512,11 @@ async def upload_session_document(
     return {
         "doc_id": str(row.get("doc_id")),
         "session_id": session_id,
-        "filename": processed.filename,
-        "content_type": processed.content_type,
-        "byte_size": processed.byte_size,
-        "char_count": processed.char_count,
-        "summary": processed.summary,
+        "filename": row.get("filename") or processed.filename,
+        "content_type": row.get("content_type") or processed.content_type,
+        "byte_size": row.get("byte_size") or processed.byte_size,
+        "char_count": row.get("char_count") or processed.char_count,
+        "summary": row.get("summary") or processed.summary,
         "status": row.get("status", "ready"),
         "created_at": row.get("created_at"),
     }
