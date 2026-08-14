@@ -120,6 +120,15 @@ class AdminProvisionClientRequest(BaseModel):
     b2_prefix: str | None = None
 
 
+class RegisterMediaStorageRequest(BaseModel):
+    source_video_id: str
+    title: str | None = None
+    source_file: str | None = None
+    b2_bucket: str
+    b2_path: str
+    thumbnail_b2_path: str | None = None
+
+
 # ── Exception handlers ─────────────────────────────────────────────────────────
 
 
@@ -769,6 +778,43 @@ async def list_media(
         "limit": limit,
         "offset": offset,
     }
+
+
+@app.post("/media/storage")
+async def register_media_storage(
+    body: RegisterMediaStorageRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Attach archived B2 objects to a tenant-owned media-library record."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+
+    client_response = (
+        await svc.table("clients_registry")
+        .select("b2_bucket")
+        .eq("client_id", str(runtime.client_id))
+        .maybe_single()
+        .execute()
+    )
+    client = as_dict(client_response.data if client_response else None)
+    configured_bucket = str((client or {}).get("b2_bucket") or "").strip()
+    if not configured_bucket:
+        raise HTTPException(status_code=409, detail="Client B2 bucket is not configured")
+    if body.b2_bucket.strip() != configured_bucket:
+        raise HTTPException(status_code=409, detail="B2 bucket does not match this workspace")
+
+    try:
+        return await media_library.register_storage(
+            svc,
+            client_id=runtime.client_id,
+            source_video_id=body.source_video_id,
+            title=body.title,
+            source_file=body.source_file,
+            b2_path=body.b2_path,
+            thumbnail_b2_path=body.thumbnail_b2_path,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/media/{source_video_id}")
