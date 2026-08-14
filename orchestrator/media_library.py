@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from typing import Any
 from uuid import UUID
 
@@ -81,6 +82,57 @@ async def get_video(
         ),
     }
     return payload
+
+
+async def register_storage(
+    svc: AsyncClient,
+    *,
+    client_id: UUID,
+    source_video_id: str,
+    title: str | None,
+    source_file: str | None,
+    b2_path: str,
+    thumbnail_b2_path: str | None,
+) -> dict[str, Any]:
+    """Idempotently attach archived video objects to one tenant's media row."""
+    source_id = source_video_id.strip()
+    video_path = _object_path(b2_path, field="b2_path")
+    thumbnail_path = (
+        _object_path(thumbnail_b2_path, field="thumbnail_b2_path") if thumbnail_b2_path else None
+    )
+    if not source_id:
+        raise ValueError("source_video_id must not be empty")
+
+    payload: dict[str, Any] = {
+        "client_id": str(client_id),
+        "source_video_id": source_id,
+        "b2_path": video_path,
+        "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    if title and title.strip():
+        payload["title"] = title.strip()
+    if source_file and source_file.strip():
+        payload["source_file"] = source_file.strip()
+    if thumbnail_path:
+        payload["thumbnail_b2_path"] = thumbnail_path
+
+    response = (
+        await svc.table("video_summaries")
+        .upsert(payload, on_conflict="client_id,source_video_id")
+        .execute()
+    )
+    rows = response.data if response and isinstance(response.data, list) else []
+    row = next((candidate for candidate in rows if isinstance(candidate, dict)), payload)
+    return _folder_payload(row)
+
+
+def _object_path(value: str, *, field: str) -> str:
+    path = value.strip().lstrip("/")
+    if not path:
+        raise ValueError(f"{field} must not be empty")
+    if ".." in path.split("/"):
+        raise ValueError(f"{field} contains an invalid path segment")
+    return path
 
 
 def _folder_payload(row: dict[str, Any]) -> dict[str, Any]:
