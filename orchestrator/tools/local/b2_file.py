@@ -14,6 +14,7 @@ from supabase import AsyncClient
 from orchestrator.supabase_json import as_dict
 from orchestrator.tools.local.b2_legend import (
     B2Legend,
+    is_image_file,
     is_media_file,
     is_text_file,
     legend_path,
@@ -882,6 +883,7 @@ class B2FileTool:
                     full_path,
                     valid_duration_seconds=valid_duration_seconds,
                     source_label=relative_path,
+                    thumbnail=True,
                 )
             return relative_path, url
 
@@ -895,6 +897,7 @@ class B2FileTool:
         *,
         valid_duration_seconds: int,
         source_label: str,
+        thumbnail: bool = False,
     ) -> str | None:
         """Mint a download token for an already tenant-resolved bucket/path."""
 
@@ -903,11 +906,13 @@ class B2FileTool:
         # caller that must not benefit from that: this URL goes to OpusClip, which
         # would be asked to cut a video out of a .txt. Fail the gate cleanly, the
         # way an unresolvable source always has.
-        if not is_media_file(full_path):
+        allowed_path = is_image_file(full_path) if thumbnail else is_media_file(full_path)
+        if not allowed_path:
             logger.warning(
-                "b2_signed_url_not_media",
+                "b2_signed_url_invalid_file_type",
                 source=source_label,
                 resolved_path=full_path,
+                expected="thumbnail" if thumbnail else "media",
             )
             return None
 

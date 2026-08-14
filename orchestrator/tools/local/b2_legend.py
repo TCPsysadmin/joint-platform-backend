@@ -99,6 +99,7 @@ MEDIA_FILE_EXTENSIONS = {
     ".mp4",
     ".wav",
 }
+IMAGE_FILE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 
 KNOWN_SOURCE_FILE_EXTENSIONS = TEXT_FILE_EXTENSIONS | MEDIA_FILE_EXTENSIONS
 
@@ -113,6 +114,11 @@ def is_text_file(path: str, content_type: str | None) -> bool:
 def is_media_file(path: str) -> bool:
     """True for a path we can rule out as text from its name alone."""
     return posixpath.splitext(path.lower())[1] in MEDIA_FILE_EXTENSIONS
+
+
+def is_image_file(path: str) -> bool:
+    """True for an image extension allowed by the media-library thumbnail signer."""
+    return posixpath.splitext(path.lower())[1] in IMAGE_FILE_EXTENSIONS
 
 
 def is_text_sidecar(file_name: str) -> bool:
