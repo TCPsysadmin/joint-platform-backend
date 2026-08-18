@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from supabase import AsyncClient, create_async_client
 
@@ -109,6 +110,10 @@ class AdminCreateUserRequest(BaseModel):
     client_id: str  # UUID string of the client to link the user to
     role: str = "member"
     display_name: str | None = None
+
+
+class CreateWorkspaceRequest(BaseModel):
+    display_name: str = Field(min_length=2, max_length=80)
 
 
 class AdminProvisionClientRequest(BaseModel):
@@ -212,6 +217,12 @@ async def _client_exists(svc: AsyncClient, client_id: uuid.UUID) -> bool:
         .execute()
     )
     return response is not None and response.data is not None
+
+
+def _workspace_slug(display_name: str, user_id: uuid.UUID) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", display_name.lower()).strip("-")
+    base = (base or "workspace")[:48].rstrip("-")
+    return f"{base}-{user_id}"
 
 
 def _turn_streams(request: Request) -> TurnStreamRegistry:
@@ -899,6 +910,96 @@ async def get_media_video_url(source_video_id: str, request: Request) -> dict[st
 
 
 # ── Admin endpoints ────────────────────────────────────────────────────────────
+
+
+@app.get("/onboarding/status")
+async def get_onboarding_status(request: Request) -> dict[str, Any]:
+    """Report whether the authenticated user already belongs to a workspace."""
+    user_id = await verify_token(extract_bearer(request))
+    svc: AsyncClient = request.app.state.svc
+    profile_response = (
+        await svc.table("user_profiles")
+        .select("client_id,role,display_name")
+        .eq("user_id", str(user_id))
+        .maybe_single()
+        .execute()
+    )
+    profile = as_dict(profile_response.data) if profile_response is not None else None
+    if profile is None:
+        return {"has_workspace": False, "user_id": str(user_id)}
+
+    client_id = str(profile["client_id"])
+    client_response = (
+        await svc.table("clients_registry")
+        .select("display_name,slug")
+        .eq("client_id", client_id)
+        .maybe_single()
+        .execute()
+    )
+    client = as_dict(client_response.data) if client_response is not None else None
+    if client is None:
+        raise HTTPException(status_code=409, detail="Workspace profile is incomplete")
+
+    return {
+        "has_workspace": True,
+        "user_id": str(user_id),
+        "client_id": client_id,
+        "role": str(profile.get("role") or "member"),
+        "display_name": str(client.get("display_name") or "Workspace"),
+        "slug": str(client.get("slug") or ""),
+    }
+
+
+@app.post("/onboarding/workspace", status_code=201)
+async def create_user_workspace(
+    request: Request,
+    body: CreateWorkspaceRequest,
+) -> dict[str, Any]:
+    """Create one isolated workspace for the authenticated user.
+
+    The database function is transactional and idempotent, so retries cannot
+    create multiple workspaces for the same user.
+    """
+    user_id = await verify_token(extract_bearer(request))
+    display_name = body.display_name.strip()
+    if len(display_name) < 2:
+        raise HTTPException(status_code=422, detail="Workspace name is too short")
+
+    svc: AsyncClient = request.app.state.svc
+    response = await svc.rpc(
+        "provision_user_workspace",
+        {
+            "p_user_id": str(user_id),
+            "p_slug": _workspace_slug(display_name, user_id),
+            "p_display_name": display_name,
+        },
+    ).execute()
+    client_id = str(response.data)
+
+    client_response = (
+        await svc.table("clients_registry")
+        .select("display_name,slug")
+        .eq("client_id", client_id)
+        .single()
+        .execute()
+    )
+    client = as_dict(client_response.data) if client_response is not None else None
+    if client is None:
+        raise HTTPException(status_code=500, detail="Workspace was created but could not be loaded")
+
+    logger.info(
+        "user_workspace_provisioned",
+        user_id=str(user_id),
+        client_id=client_id,
+    )
+    return {
+        "has_workspace": True,
+        "user_id": str(user_id),
+        "client_id": client_id,
+        "role": "admin",
+        "display_name": str(client.get("display_name") or display_name),
+        "slug": str(client.get("slug") or ""),
+    }
 
 
 @app.post("/admin/clients", status_code=201)
