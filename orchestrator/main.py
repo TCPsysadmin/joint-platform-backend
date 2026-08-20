@@ -928,7 +928,7 @@ async def get_onboarding_status(request: Request) -> dict[str, Any]:
         .maybe_single()
         .execute()
     )
-    profile = as_dict(profile_response.data) if profile_response is not None else None
+    profile = as_dict(profile_response.data if profile_response is not None else None)
     if profile is None:
         return {"has_workspace": False, "user_id": str(user_id)}
 
@@ -940,11 +940,11 @@ async def get_onboarding_status(request: Request) -> dict[str, Any]:
         .maybe_single()
         .execute()
     )
-    client = as_dict(client_response.data) if client_response is not None else None
+    client = as_dict(client_response.data if client_response is not None else None)
     if client is None:
         raise HTTPException(status_code=409, detail="Workspace profile is incomplete")
 
-    metadata = client.get("metadata") if isinstance(client.get("metadata"), dict) else {}
+    metadata = as_dict(client.get("metadata")) or {}
     self_service = bool(metadata.get("self_service"))
     storage_status = str(metadata.get("storage_provisioning_status") or "ready")
 
@@ -998,11 +998,11 @@ async def create_user_workspace(
         .single()
         .execute()
     )
-    client = as_dict(client_response.data) if client_response is not None else None
+    client = as_dict(client_response.data if client_response is not None else None)
     if client is None:
         raise HTTPException(status_code=500, detail="Workspace was created but could not be loaded")
 
-    metadata = client.get("metadata") if isinstance(client.get("metadata"), dict) else {}
+    metadata = as_dict(client.get("metadata")) or {}
     if metadata.get("storage_provisioning_status") != "ready":
         pending_metadata = {
             **metadata,
