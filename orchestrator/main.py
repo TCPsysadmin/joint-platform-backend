@@ -916,8 +916,8 @@ async def get_media_video_url(source_video_id: str, request: Request) -> dict[st
 # ── Admin endpoints ────────────────────────────────────────────────────────────
 
 
-@app.get("/onboarding/status")
-async def get_onboarding_status(request: Request) -> dict[str, Any]:
+@app.get("/workspace/status")
+async def get_workspace_status(request: Request) -> dict[str, Any]:
     """Report whether the authenticated user already belongs to a workspace."""
     user_id = await verify_token(extract_bearer(request))
     svc: AsyncClient = request.app.state.svc
@@ -959,8 +959,8 @@ async def get_onboarding_status(request: Request) -> dict[str, Any]:
     }
 
 
-@app.post("/onboarding/workspace", status_code=201)
-async def create_user_workspace(
+@app.post("/workspace/ensure", status_code=201)
+async def ensure_user_workspace(
     request: Request,
     body: CreateWorkspaceRequest,
 ) -> dict[str, Any]:

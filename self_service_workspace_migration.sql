@@ -15,7 +15,7 @@ declare
     v_client_id uuid;
 begin
     -- Serialize retries for the same auth user. This prevents two concurrent
-    -- onboarding requests from creating two clients before user_profiles exists.
+    -- workspace setup requests from creating two clients before user_profiles exists.
     perform pg_advisory_xact_lock(hashtext(p_user_id::text));
 
     select client_id

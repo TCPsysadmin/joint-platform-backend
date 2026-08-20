@@ -20,7 +20,7 @@ def _maybe_single_query(data: object) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_onboarding_status_reports_missing_workspace(
+async def test_workspace_status_reports_missing_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     svc = MagicMock()
@@ -31,13 +31,13 @@ async def test_onboarding_status_reports_missing_workspace(
     )
     monkeypatch.setattr(main, "verify_token", AsyncMock(return_value=FAKE_USER_ID))
 
-    result = await main.get_onboarding_status(request)  # type: ignore[arg-type]
+    result = await main.get_workspace_status(request)  # type: ignore[arg-type]
 
     assert result == {"has_workspace": False, "user_id": str(FAKE_USER_ID)}
 
 
 @pytest.mark.asyncio
-async def test_onboarding_status_returns_existing_workspace(
+async def test_workspace_status_returns_existing_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profile_query = _maybe_single_query(
@@ -58,7 +58,7 @@ async def test_onboarding_status_returns_existing_workspace(
     )
     monkeypatch.setattr(main, "verify_token", AsyncMock(return_value=FAKE_USER_ID))
 
-    result = await main.get_onboarding_status(request)  # type: ignore[arg-type]
+    result = await main.get_workspace_status(request)  # type: ignore[arg-type]
 
     assert result["has_workspace"] is True
     assert result["client_id"] == str(FAKE_CLIENT_ID)
@@ -106,7 +106,7 @@ async def test_create_workspace_uses_authenticated_user_and_isolated_slug(
     )
     monkeypatch.setattr(main, "provision_workspace_storage", provision)
 
-    result = await main.create_user_workspace(
+    result = await main.ensure_user_workspace(
         request,  # type: ignore[arg-type]
         main.CreateWorkspaceRequest(display_name="  Taylor Studio  "),
     )
