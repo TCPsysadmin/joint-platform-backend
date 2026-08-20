@@ -1149,9 +1149,10 @@ begin
     end if;
 
     insert into public.clients_registry (
-        slug, display_name, source_kind, plan_tier, b2_prefix
+        slug, display_name, source_kind, plan_tier, b2_prefix, metadata
     ) values (
-        p_slug, p_display_name, 'managed', 'standard', ''
+        p_slug, p_display_name, 'managed', 'standard', '',
+        '{"self_service":true,"storage_provisioning_status":"pending"}'::jsonb
     ) returning client_id into v_client_id;
 
     insert into public.brand_doctrine (client_id, version, name, description, rubric)

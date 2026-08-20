@@ -35,6 +35,10 @@ from orchestrator.graph import build_graph
 from orchestrator.observability import bind_request_context, configure_logging
 from orchestrator.runtime import RuntimeContext
 from orchestrator.sse_sanitize import compact_partial_state
+from orchestrator.storage_provisioning import (
+    StorageProvisioningError,
+    provision_workspace_storage,
+)
 from orchestrator.supabase_json import as_dict, as_dict_list
 from orchestrator.turn_stream import (
     Publisher,
@@ -931,7 +935,7 @@ async def get_onboarding_status(request: Request) -> dict[str, Any]:
     client_id = str(profile["client_id"])
     client_response = (
         await svc.table("clients_registry")
-        .select("display_name,slug")
+        .select("display_name,slug,metadata")
         .eq("client_id", client_id)
         .maybe_single()
         .execute()
@@ -940,6 +944,10 @@ async def get_onboarding_status(request: Request) -> dict[str, Any]:
     if client is None:
         raise HTTPException(status_code=409, detail="Workspace profile is incomplete")
 
+    metadata = client.get("metadata") if isinstance(client.get("metadata"), dict) else {}
+    self_service = bool(metadata.get("self_service"))
+    storage_status = str(metadata.get("storage_provisioning_status") or "ready")
+
     return {
         "has_workspace": True,
         "user_id": str(user_id),
@@ -947,6 +955,7 @@ async def get_onboarding_status(request: Request) -> dict[str, Any]:
         "role": str(profile.get("role") or "member"),
         "display_name": str(client.get("display_name") or "Workspace"),
         "slug": str(client.get("slug") or ""),
+        "storage_status": storage_status if self_service else "ready",
     }
 
 
@@ -974,11 +983,17 @@ async def create_user_workspace(
             "p_display_name": display_name,
         },
     ).execute()
-    client_id = str(response.data)
+    try:
+        client_uuid = uuid.UUID(str(response.data))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500, detail="Workspace provisioning returned an invalid ID"
+        ) from exc
+    client_id = str(client_uuid)
 
     client_response = (
         await svc.table("clients_registry")
-        .select("display_name,slug")
+        .select("display_name,slug,metadata")
         .eq("client_id", client_id)
         .single()
         .execute()
@@ -986,6 +1001,64 @@ async def create_user_workspace(
     client = as_dict(client_response.data) if client_response is not None else None
     if client is None:
         raise HTTPException(status_code=500, detail="Workspace was created but could not be loaded")
+
+    metadata = client.get("metadata") if isinstance(client.get("metadata"), dict) else {}
+    if metadata.get("storage_provisioning_status") != "ready":
+        pending_metadata = {
+            **metadata,
+            "self_service": True,
+            "storage_provisioning_status": "pending",
+        }
+        await (
+            svc.table("clients_registry")
+            .update({"metadata": pending_metadata})
+            .eq("client_id", client_id)
+            .execute()
+        )
+        try:
+            storage = await provision_workspace_storage(client_uuid, display_name)
+        except StorageProvisioningError as exc:
+            await (
+                svc.table("clients_registry")
+                .update(
+                    {
+                        "metadata": {
+                            **pending_metadata,
+                            "storage_provisioning_status": "failed",
+                        }
+                    }
+                )
+                .eq("client_id", client_id)
+                .execute()
+            )
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        await (
+            svc.table("clients_registry")
+            .update(
+                {
+                    "b2_bucket": storage.b2_bucket,
+                    "b2_prefix": "",
+                    "source_kind": "gdrive",
+                    "drive_transcripts_intake_folder_id": (
+                        storage.drive_transcripts_intake_folder_id
+                    ),
+                    "drive_summaries_intake_folder_id": storage.drive_summaries_intake_folder_id,
+                    "drive_transcripts_completed_folder_id": (
+                        storage.drive_transcripts_completed_folder_id
+                    ),
+                    "drive_summaries_completed_folder_id": (
+                        storage.drive_summaries_completed_folder_id
+                    ),
+                    "metadata": {
+                        **pending_metadata,
+                        "storage_provisioning_status": "ready",
+                    },
+                }
+            )
+            .eq("client_id", client_id)
+            .execute()
+        )
 
     logger.info(
         "user_workspace_provisioned",
@@ -999,6 +1072,7 @@ async def create_user_workspace(
         "role": "admin",
         "display_name": str(client.get("display_name") or display_name),
         "slug": str(client.get("slug") or ""),
+        "storage_status": "ready",
     }
 
 

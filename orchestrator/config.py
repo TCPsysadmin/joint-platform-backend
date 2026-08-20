@@ -25,6 +25,14 @@ class Settings(BaseSettings):
 
     b2_key_id: str = ""
     b2_application_key: str = ""
+    b2_workspace_bucket_prefix: str = "vpstorage"
+
+    # Self-service storage provisioning. The webhook is an n8n workflow that
+    # uses the existing Google Drive OAuth credential to create the intake and
+    # completed folders beneath this TCP Shared Drive parent.
+    storage_provisioning_webhook_url: str = ""
+    storage_provisioning_webhook_secret: str = ""
+    google_drive_provisioning_parent_id: str = "1RJQXpLXOE3cXclgpZfvSPt0U648pYuIb"
 
     opusclip_api_key: str = ""
     opusclip_api_url: str = "https://api.opus.pro/api"

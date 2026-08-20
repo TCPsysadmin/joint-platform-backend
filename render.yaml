@@ -17,6 +17,18 @@ services:
         value: "https://api.x.ai/v1"
       - key: OPENAI_API_KEY
         sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
+        sync: false
+      - key: B2_WORKSPACE_BUCKET_PREFIX
+        value: "vpstorage"
+      - key: STORAGE_PROVISIONING_WEBHOOK_URL
+        sync: false
+      - key: STORAGE_PROVISIONING_WEBHOOK_SECRET
+        sync: false
+      - key: GOOGLE_DRIVE_PROVISIONING_PARENT_ID
+        value: "1RJQXpLXOE3cXclgpZfvSPt0U648pYuIb"
       - key: LANGCHAIN_TRACING_V2
         value: "false"
       - key: LANGCHAIN_API_KEY

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from orchestrator import main
+from orchestrator.storage_provisioning import ProvisionedStorage
 from tests.conftest import FAKE_CLIENT_ID, FAKE_USER_ID
 
 
@@ -74,12 +75,17 @@ async def test_create_workspace_uses_authenticated_user_and_isolated_slug(
     rpc_query.execute = AsyncMock(return_value=rpc_response)
 
     client_response = MagicMock(
-        data={"display_name": "Taylor Studio", "slug": "taylor-studio-00000000"}
+        data={
+            "display_name": "Taylor Studio",
+            "slug": "taylor-studio-00000000",
+            "metadata": {"self_service": True, "storage_provisioning_status": "pending"},
+        }
     )
     client_query = MagicMock()
     client_query.select.return_value.eq.return_value.single.return_value.execute = AsyncMock(
         return_value=client_response
     )
+    client_query.update.return_value.eq.return_value.execute = AsyncMock(return_value=MagicMock())
 
     svc = MagicMock()
     svc.rpc.return_value = rpc_query
@@ -89,6 +95,16 @@ async def test_create_workspace_uses_authenticated_user_and_isolated_slug(
         headers={"Authorization": "Bearer token"},
     )
     monkeypatch.setattr(main, "verify_token", AsyncMock(return_value=FAKE_USER_ID))
+    provision = AsyncMock(
+        return_value=ProvisionedStorage(
+            b2_bucket="vpstorage-test",
+            drive_transcripts_intake_folder_id="transcripts-in",
+            drive_summaries_intake_folder_id="summaries-in",
+            drive_transcripts_completed_folder_id="transcripts-done",
+            drive_summaries_completed_folder_id="summaries-done",
+        )
+    )
+    monkeypatch.setattr(main, "provision_workspace_storage", provision)
 
     result = await main.create_user_workspace(
         request,  # type: ignore[arg-type]
@@ -97,6 +113,7 @@ async def test_create_workspace_uses_authenticated_user_and_isolated_slug(
 
     assert result["client_id"] == str(FAKE_CLIENT_ID)
     assert result["role"] == "admin"
+    assert result["storage_status"] == "ready"
     svc.rpc.assert_called_once_with(
         "provision_user_workspace",
         {
@@ -105,6 +122,7 @@ async def test_create_workspace_uses_authenticated_user_and_isolated_slug(
             "p_display_name": "Taylor Studio",
         },
     )
+    provision.assert_awaited_once_with(FAKE_CLIENT_ID, "Taylor Studio")
 
 
 def test_workspace_slug_is_stable_and_url_safe() -> None:
