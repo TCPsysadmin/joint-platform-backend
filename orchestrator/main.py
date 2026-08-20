@@ -817,8 +817,21 @@ async def register_media_storage(
     configured_bucket = str((client or {}).get("b2_bucket") or "").strip()
     if not configured_bucket:
         raise HTTPException(status_code=409, detail="Client B2 bucket is not configured")
-    if body.b2_bucket.strip() != configured_bucket:
-        raise HTTPException(status_code=409, detail="B2 bucket does not match this workspace")
+    submitted_bucket = body.b2_bucket.strip()
+    if submitted_bucket != configured_bucket:
+        logger.warning(
+            "media_storage_bucket_mismatch",
+            client_id=str(runtime.client_id),
+            submitted_bucket=submitted_bucket,
+            configured_bucket=configured_bucket,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "B2 bucket does not match this workspace: "
+                f"received '{submitted_bucket}', expected '{configured_bucket}'"
+            ),
+        )
 
     try:
         return await media_library.register_storage(
