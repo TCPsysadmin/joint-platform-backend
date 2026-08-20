@@ -27,6 +27,7 @@ async def test_ingestion_config_is_resolved_from_authenticated_user(
         {
             "client_id": str(FAKE_CLIENT_ID),
             "display_name": "Test Company",
+            "b2_bucket": "vpstorage-test",
             "drive_transcripts_intake_folder_id": "transcripts-in",
             "drive_summaries_intake_folder_id": "summaries-in",
             "drive_transcripts_completed_folder_id": "transcripts-done",
@@ -46,6 +47,7 @@ async def test_ingestion_config_is_resolved_from_authenticated_user(
 
     assert response["client_id"] == str(FAKE_CLIENT_ID)
     assert response["name"] == "Test Company"
+    assert response["b2_bucket"] == "vpstorage-test"
     assert response["transcripts_folder_id"] == "transcripts-in"
     query.select.return_value.eq.assert_called_once_with("client_id", str(FAKE_CLIENT_ID))
 
@@ -59,6 +61,7 @@ async def test_ingestion_destinations_only_returns_authenticated_client(
         {
             "client_id": str(FAKE_CLIENT_ID),
             "display_name": "Test Company",
+            "b2_bucket": "vpstorage-test",
             "drive_transcripts_intake_folder_id": "transcripts-in",
             "drive_summaries_intake_folder_id": "summaries-in",
             "drive_transcripts_completed_folder_id": "transcripts-done",
@@ -67,6 +70,7 @@ async def test_ingestion_destinations_only_returns_authenticated_client(
         {
             "client_id": "other-client",
             "display_name": "Other Company",
+            "b2_bucket": "vpstorage-other",
             "drive_transcripts_intake_folder_id": "other-transcripts-in",
             "drive_summaries_intake_folder_id": "other-summaries-in",
             "drive_transcripts_completed_folder_id": "other-transcripts-done",
@@ -92,6 +96,7 @@ async def test_ingestion_destinations_only_returns_authenticated_client(
             {
                 "client_id": str(FAKE_CLIENT_ID),
                 "name": "Test Company",
+                "b2_bucket": "vpstorage-test",
                 "transcripts_folder_id": "transcripts-in",
                 "summaries_folder_id": "summaries-in",
                 "transcripts_completed_folder_id": "transcripts-done",

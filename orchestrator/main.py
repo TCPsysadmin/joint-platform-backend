@@ -684,7 +684,7 @@ async def get_ingestion_config(request: Request) -> dict[str, Any]:
     response = (
         await svc.table("clients_registry")
         .select(
-            "client_id,display_name,drive_transcripts_intake_folder_id,"
+            "client_id,display_name,b2_bucket,drive_transcripts_intake_folder_id,"
             "drive_summaries_intake_folder_id,"
             "drive_transcripts_completed_folder_id,"
             "drive_summaries_completed_folder_id"
@@ -701,6 +701,7 @@ async def get_ingestion_config(request: Request) -> dict[str, Any]:
         )
 
     required = {
+        "b2_bucket": row.get("b2_bucket"),
         "transcripts_folder_id": row.get("drive_transcripts_intake_folder_id"),
         "summaries_folder_id": row.get("drive_summaries_intake_folder_id"),
         "transcripts_completed_folder_id": row.get("drive_transcripts_completed_folder_id"),
@@ -731,7 +732,7 @@ async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
     response = (
         await svc.table("clients_registry")
         .select(
-            "client_id,display_name,drive_transcripts_intake_folder_id,"
+            "client_id,display_name,b2_bucket,drive_transcripts_intake_folder_id,"
             "drive_summaries_intake_folder_id,"
             "drive_transcripts_completed_folder_id,"
             "drive_summaries_completed_folder_id"
@@ -751,6 +752,7 @@ async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
         destination = {
             "client_id": str(row.get("client_id") or ""),
             "name": str(row.get("display_name") or "Workspace"),
+            "b2_bucket": str(row.get("b2_bucket") or ""),
             "transcripts_folder_id": str(row.get("drive_transcripts_intake_folder_id") or ""),
             "summaries_folder_id": str(row.get("drive_summaries_intake_folder_id") or ""),
             "transcripts_completed_folder_id": str(
