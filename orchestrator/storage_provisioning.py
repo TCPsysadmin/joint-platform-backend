@@ -106,13 +106,15 @@ async def ensure_private_b2_bucket(client_id: UUID) -> str:
 async def provision_drive_folders(client_id: UUID, display_name: str) -> dict[str, str]:
     if not settings.storage_provisioning_webhook_url:
         raise StorageProvisioningError("Google Drive provisioning webhook is not configured")
-    if not settings.storage_provisioning_webhook_secret:
-        raise StorageProvisioningError("Google Drive provisioning webhook secret is not configured")
+
+    headers: dict[str, str] = {}
+    if settings.storage_provisioning_webhook_secret:
+        headers["X-VP-Provisioning-Secret"] = settings.storage_provisioning_webhook_secret
 
     async with httpx.AsyncClient(timeout=45.0) as http:
         response = await http.post(
             settings.storage_provisioning_webhook_url,
-            headers={"X-VP-Provisioning-Secret": settings.storage_provisioning_webhook_secret},
+            headers=headers,
             json={
                 "client_id": str(client_id),
                 "display_name": display_name,
