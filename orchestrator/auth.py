@@ -40,8 +40,8 @@ def extract_bearer(request: Request) -> str:
     return token
 
 
-async def verify_token(token: str) -> UUID:
-    """Verify a Supabase Auth JWT and return the user's UUID.
+async def verify_user(token: str) -> dict[str, object]:
+    """Verify a Supabase Auth JWT and return its authenticated user payload.
 
     Calls the Supabase /auth/v1/user endpoint, which validates the JWT
     signature and expiry server-side.
@@ -67,14 +67,22 @@ async def verify_token(token: str) -> UUID:
     if resp.status_code != 200:
         raise AuthError(f"Auth verification failed (status {resp.status_code})")
 
+    payload = resp.json()
+    if not isinstance(payload, dict) or not payload.get("id"):
+        raise AuthError("Unexpected user payload from Supabase Auth")
+    return payload
+
+
+async def verify_token(token: str) -> UUID:
+    """Verify a Supabase Auth JWT and return the user's UUID."""
     try:
-        return UUID(resp.json()["id"])
+        return UUID(str((await verify_user(token))["id"]))
     except (KeyError, ValueError) as exc:
         raise AuthError("Unexpected user payload from Supabase Auth") from exc
 
 
 async def get_client_id(user_id: UUID, svc: AsyncClient) -> UUID:
-    """Look up the client_id linked to a user via user_profiles."""
+    """Look up the user's legacy/default client_id via user_profiles."""
     response = (
         await svc.table("user_profiles")
         .select("client_id")
@@ -96,6 +104,39 @@ async def get_client_id(user_id: UUID, svc: AsyncClient) -> UUID:
         raise AuthError("Malformed client_id in user profile") from exc
 
 
+async def get_request_client_id(
+    request: Request,
+    user_id: UUID,
+    svc: AsyncClient,
+) -> UUID:
+    """Resolve and authorize the workspace selected for this request.
+
+    Older clients omit X-Workspace-ID and continue to use user_profiles as
+    their default workspace. New clients send the selected workspace ID and
+    must have an explicit workspace_memberships row.
+    """
+    requested = request.headers.get("X-Workspace-ID", "").strip()
+    if not requested:
+        return await get_client_id(user_id, svc)
+
+    try:
+        client_id = UUID(requested)
+    except ValueError as exc:
+        raise AuthError("X-Workspace-ID must be a valid UUID") from exc
+
+    response = (
+        await svc.table("workspace_memberships")
+        .select("client_id")
+        .eq("client_id", str(client_id))
+        .eq("user_id", str(user_id))
+        .maybe_single()
+        .execute()
+    )
+    if response is None or response.data is None:
+        raise AuthError("You do not have access to the selected workspace")
+    return client_id
+
+
 async def resolve_runtime(request: Request, svc: AsyncClient) -> RuntimeContext:
     """Build a RuntimeContext from the incoming request.
 
@@ -107,7 +148,7 @@ async def resolve_runtime(request: Request, svc: AsyncClient) -> RuntimeContext:
     """
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await get_request_client_id(request, user_id, svc)
 
     logger.info("auth_resolved", user_id=str(user_id), client_id=str(client_id))
 

@@ -11,7 +11,8 @@ from orchestrator.supabase_json import as_dict
 _VIDEO_COLUMNS = (
     "summary_id, source_video_id, title, source_file, has_timestamps, "
     "duration_seconds, recorded_at, summary_text, topics, speakers, "
-    "quality_score, b2_path, thumbnail_url, thumbnail_b2_path, created_at, updated_at"
+    "quality_score, b2_path, thumbnail_url, thumbnail_b2_path, "
+    "uploaded_by_user_id, uploaded_by_email, created_at, updated_at"
 )
 
 
@@ -93,6 +94,8 @@ async def register_storage(
     source_file: str | None,
     b2_path: str,
     thumbnail_b2_path: str | None,
+    uploaded_by_user_id: UUID,
+    uploaded_by_email: str | None = None,
 ) -> dict[str, Any]:
     """Idempotently attach archived video objects to one tenant's media row."""
     source_id = source_video_id.strip()
@@ -107,8 +110,11 @@ async def register_storage(
         "client_id": str(client_id),
         "source_video_id": source_id,
         "b2_path": video_path,
+        "uploaded_by_user_id": str(uploaded_by_user_id),
         "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
+    if uploaded_by_email:
+        payload["uploaded_by_email"] = uploaded_by_email
     if title and title.strip():
         payload["title"] = title.strip()
     if source_file and source_file.strip():
@@ -158,6 +164,10 @@ def _folder_payload(row: dict[str, Any]) -> dict[str, Any]:
             "topics": row.get("topics") or [],
             "speakers": row.get("speakers") or [],
             "quality_score": row.get("quality_score"),
+        },
+        "uploaded_by": {
+            "user_id": row.get("uploaded_by_user_id"),
+            "email": row.get("uploaded_by_email"),
         },
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),

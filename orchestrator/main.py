@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import re
+import secrets
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -26,6 +28,10 @@ from orchestrator.auth import (
     get_client_id,
     resolve_runtime,
     verify_token,
+    verify_user,
+)
+from orchestrator.auth import (
+    get_request_client_id as get_authorized_client_id,
 )
 from orchestrator.checkpointer import get_checkpointer
 from orchestrator.config import settings
@@ -118,6 +124,20 @@ class AdminCreateUserRequest(BaseModel):
 
 class CreateWorkspaceRequest(BaseModel):
     display_name: str = Field(min_length=2, max_length=80)
+
+
+class CreateWorkspaceInviteRequest(BaseModel):
+    role: str = Field(default="member", pattern="^(admin|member)$")
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+    max_uses: int = Field(default=1, ge=1, le=100)
+
+
+class JoinWorkspaceRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=512)
+
+
+class UpdateWorkspaceMemberRequest(BaseModel):
+    role: str = Field(pattern="^(admin|member)$")
 
 
 class AdminProvisionClientRequest(BaseModel):
@@ -227,6 +247,113 @@ def _workspace_slug(display_name: str, user_id: uuid.UUID) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", display_name.lower()).strip("-")
     base = (base or "workspace")[:48].rstrip("-")
     return f"{base}-{user_id}"
+
+
+def _additional_workspace_slug(display_name: str, user_id: uuid.UUID) -> str:
+    return f"{_workspace_slug(display_name, user_id)}-{uuid.uuid4().hex[:8]}"
+
+
+def _invite_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+async def _request_client_id(
+    request: Request,
+    user_id: uuid.UUID,
+    svc: AsyncClient,
+) -> uuid.UUID:
+    """Use the legacy resolver unless the client explicitly selects a workspace."""
+    headers = getattr(request, "headers", {})
+    requested = str(headers.get("X-Workspace-ID", "")).strip()
+    if not requested:
+        return await get_client_id(user_id, svc)
+    return await get_authorized_client_id(request, user_id, svc)
+
+
+async def _workspace_membership(
+    svc: AsyncClient,
+    *,
+    user_id: uuid.UUID,
+    client_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    response = (
+        await svc.table("workspace_memberships")
+        .select("client_id,user_id,role,display_name,email,joined_at")
+        .eq("client_id", str(client_id))
+        .eq("user_id", str(user_id))
+        .maybe_single()
+        .execute()
+    )
+    return as_dict(response.data if response is not None else None)
+
+
+async def _require_workspace_manager(
+    svc: AsyncClient,
+    *,
+    user_id: uuid.UUID,
+    client_id: uuid.UUID,
+) -> dict[str, Any]:
+    membership = await _workspace_membership(
+        svc,
+        user_id=user_id,
+        client_id=client_id,
+    )
+    if membership is None:
+        raise HTTPException(status_code=403, detail="You are not a member of this workspace")
+    if str(membership.get("role") or "") not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Workspace admin access is required")
+    return membership
+
+
+async def _provision_additional_workspace_storage(
+    svc: AsyncClient,
+    *,
+    client_id: uuid.UUID,
+    display_name: str,
+) -> None:
+    """Provision isolated B2 and Drive storage for a newly created workspace."""
+    try:
+        storage = await provision_workspace_storage(client_id, display_name)
+    except StorageProvisioningError as exc:
+        await (
+            svc.table("clients_registry")
+            .update(
+                {
+                    "metadata": {
+                        "self_service": True,
+                        "storage_provisioning_status": "failed",
+                    }
+                }
+            )
+            .eq("client_id", str(client_id))
+            .execute()
+        )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    await (
+        svc.table("clients_registry")
+        .update(
+            {
+                "b2_bucket": storage.b2_bucket,
+                "b2_prefix": "",
+                "source_kind": "gdrive",
+                "drive_transcripts_intake_folder_id": (storage.drive_transcripts_intake_folder_id),
+                "drive_summaries_intake_folder_id": (storage.drive_summaries_intake_folder_id),
+                "drive_transcripts_completed_folder_id": (
+                    storage.drive_transcripts_completed_folder_id
+                ),
+                "drive_summaries_completed_folder_id": (
+                    storage.drive_summaries_completed_folder_id
+                ),
+                "metadata": {
+                    "self_service": True,
+                    "storage_provisioning_status": "ready",
+                },
+            }
+        )
+        .eq("client_id", str(client_id))
+        .execute()
+    )
 
 
 def _turn_streams(request: Request) -> TurnStreamRegistry:
@@ -481,7 +608,7 @@ async def create_session(request: Request, body: CreateSessionRequest) -> dict[s
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
 
     sid = body.session_id or str(uuid.uuid4())
     row = await session_manager.create_session(
@@ -505,7 +632,7 @@ async def upload_session_document(
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
 
     await session_manager.get_or_create_session(
         svc,
@@ -552,7 +679,7 @@ async def get_session_documents(session_id: str, request: Request) -> dict[str, 
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
 
     response = (
         await svc.table("chat_sessions")
@@ -599,7 +726,7 @@ async def list_sessions(request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
 
     sessions = await session_manager.list_sessions(svc, user_id, client_id)
     return {"sessions": sessions}
@@ -615,7 +742,7 @@ async def get_session_messages(session_id: str, request: Request) -> dict[str, A
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    runtime_client_id = await get_client_id(user_id, svc)
+    runtime_client_id = await _request_client_id(request, user_id, svc)
 
     # Ownership check: verify the session belongs to this user and tenant.
     response = (
@@ -663,7 +790,7 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
 
     archived = await session_manager.archive_session(svc, session_id, user_id, client_id)
     if not archived:
@@ -680,7 +807,7 @@ async def get_ingestion_config(request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
     response = (
         await svc.table("clients_registry")
         .select(
@@ -727,7 +854,7 @@ async def list_ingestion_destinations(request: Request) -> dict[str, Any]:
     svc: AsyncClient = request.app.state.svc
     token = extract_bearer(request)
     user_id = await verify_token(token)
-    client_id = await get_client_id(user_id, svc)
+    client_id = await _request_client_id(request, user_id, svc)
 
     response = (
         await svc.table("clients_registry")
@@ -834,6 +961,11 @@ async def register_media_storage(
         )
 
     try:
+        membership = await _workspace_membership(
+            svc,
+            user_id=runtime.user_id,
+            client_id=runtime.client_id,
+        )
         return await media_library.register_storage(
             svc,
             client_id=runtime.client_id,
@@ -842,6 +974,8 @@ async def register_media_storage(
             source_file=body.source_file,
             b2_path=body.b2_path,
             thumbnail_b2_path=body.thumbnail_b2_path,
+            uploaded_by_user_id=runtime.user_id,
+            uploaded_by_email=str((membership or {}).get("email") or "") or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -929,6 +1063,246 @@ async def get_media_video_url(source_video_id: str, request: Request) -> dict[st
 
 
 # ── Admin endpoints ────────────────────────────────────────────────────────────
+
+
+@app.get("/workspaces")
+async def list_user_workspaces(request: Request) -> dict[str, Any]:
+    """List every workspace the authenticated user can access."""
+    user_id = await verify_token(extract_bearer(request))
+    svc: AsyncClient = request.app.state.svc
+    memberships_response = (
+        await svc.table("workspace_memberships")
+        .select("client_id,role,joined_at")
+        .eq("user_id", str(user_id))
+        .execute()
+    )
+    memberships = as_dict_list(
+        memberships_response.data if memberships_response is not None else None
+    )
+    ids = [str(row.get("client_id") or "") for row in memberships if row.get("client_id")]
+    if not ids:
+        return {"workspaces": []}
+
+    clients_response = (
+        await svc.table("clients_registry")
+        .select("client_id,display_name,slug,metadata,status")
+        .in_("client_id", ids)
+        .eq("status", "active")
+        .order("display_name")
+        .execute()
+    )
+    clients = {
+        str(row.get("client_id") or ""): row
+        for row in as_dict_list(clients_response.data if clients_response is not None else None)
+    }
+    workspaces: list[dict[str, Any]] = []
+    for membership in memberships:
+        client_id = str(membership.get("client_id") or "")
+        client = clients.get(client_id)
+        if client is None:
+            continue
+        metadata = as_dict(client.get("metadata")) or {}
+        workspaces.append(
+            {
+                "client_id": client_id,
+                "display_name": str(client.get("display_name") or "Workspace"),
+                "slug": str(client.get("slug") or ""),
+                "role": str(membership.get("role") or "member"),
+                "joined_at": membership.get("joined_at"),
+                "storage_status": str(metadata.get("storage_provisioning_status") or "ready"),
+            }
+        )
+    return {"workspaces": workspaces}
+
+
+@app.post("/workspaces", status_code=201)
+async def create_additional_workspace(
+    request: Request,
+    body: CreateWorkspaceRequest,
+) -> dict[str, Any]:
+    """Create another isolated workspace owned by the authenticated user."""
+    user_id = await verify_token(extract_bearer(request))
+    display_name = body.display_name.strip()
+    svc: AsyncClient = request.app.state.svc
+    response = await svc.rpc(
+        "create_additional_workspace",
+        {
+            "p_user_id": str(user_id),
+            "p_slug": _additional_workspace_slug(display_name, user_id),
+            "p_display_name": display_name,
+        },
+    ).execute()
+    try:
+        client_id = uuid.UUID(str(response.data))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500, detail="Workspace creation returned an invalid ID"
+        ) from exc
+
+    await _provision_additional_workspace_storage(
+        svc,
+        client_id=client_id,
+        display_name=display_name,
+    )
+    return {
+        "client_id": str(client_id),
+        "display_name": display_name,
+        "role": "owner",
+        "storage_status": "ready",
+    }
+
+
+@app.get("/workspaces/{client_id}/members")
+async def list_workspace_members(client_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    user_id = await verify_token(extract_bearer(request))
+    svc: AsyncClient = request.app.state.svc
+    membership = await _workspace_membership(
+        svc,
+        user_id=user_id,
+        client_id=client_id,
+    )
+    if membership is None:
+        raise HTTPException(status_code=403, detail="You are not a member of this workspace")
+    response = (
+        await svc.table("workspace_memberships")
+        .select("user_id,role,display_name,email,joined_at")
+        .eq("client_id", str(client_id))
+        .order("joined_at")
+        .execute()
+    )
+    return {"members": as_dict_list(response.data if response is not None else None)}
+
+
+@app.post("/workspaces/{client_id}/invites", status_code=201)
+async def create_workspace_invite(
+    client_id: uuid.UUID,
+    request: Request,
+    body: CreateWorkspaceInviteRequest,
+) -> dict[str, Any]:
+    user_id = await verify_token(extract_bearer(request))
+    svc: AsyncClient = request.app.state.svc
+    await _require_workspace_manager(svc, user_id=user_id, client_id=client_id)
+
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=body.expires_in_days)
+    response = (
+        await svc.table("workspace_invites")
+        .insert(
+            {
+                "client_id": str(client_id),
+                "token_hash": _invite_hash(token),
+                "role": body.role,
+                "created_by": str(user_id),
+                "expires_at": expires_at.isoformat(),
+                "max_uses": body.max_uses,
+            }
+        )
+        .execute()
+    )
+    rows = as_dict_list(response.data if response is not None else None)
+    invite = rows[0] if rows else {}
+    return {
+        "invite_id": str(invite.get("invite_id") or ""),
+        "token": token,
+        "role": body.role,
+        "expires_at": expires_at.isoformat(),
+        "max_uses": body.max_uses,
+    }
+
+
+@app.post("/workspaces/join")
+async def join_workspace(request: Request, body: JoinWorkspaceRequest) -> dict[str, Any]:
+    user = await verify_user(extract_bearer(request))
+    user_id = uuid.UUID(str(user["id"]))
+    metadata = as_dict(user.get("user_metadata")) or {}
+    display_name = str(metadata.get("full_name") or metadata.get("name") or "")
+    svc: AsyncClient = request.app.state.svc
+    try:
+        response = await svc.rpc(
+            "accept_workspace_invite",
+            {
+                "p_token_hash": _invite_hash(body.token.strip()),
+                "p_user_id": str(user_id),
+                "p_email": str(user.get("email") or ""),
+                "p_display_name": display_name,
+            },
+        ).execute()
+        client_id = uuid.UUID(str(response.data))
+    except Exception as exc:
+        raise HTTPException(status_code=410, detail="Invite is invalid or expired") from exc
+
+    membership = await _workspace_membership(svc, user_id=user_id, client_id=client_id)
+    client_response = (
+        await svc.table("clients_registry")
+        .select("display_name,slug")
+        .eq("client_id", str(client_id))
+        .single()
+        .execute()
+    )
+    client = as_dict(client_response.data if client_response is not None else None) or {}
+    return {
+        "client_id": str(client_id),
+        "display_name": str(client.get("display_name") or "Workspace"),
+        "slug": str(client.get("slug") or ""),
+        "role": str((membership or {}).get("role") or "member"),
+        "storage_status": "ready",
+    }
+
+
+@app.patch("/workspaces/{client_id}/members/{member_user_id}")
+async def update_workspace_member(
+    client_id: uuid.UUID,
+    member_user_id: uuid.UUID,
+    request: Request,
+    body: UpdateWorkspaceMemberRequest,
+) -> dict[str, Any]:
+    user_id = await verify_token(extract_bearer(request))
+    svc: AsyncClient = request.app.state.svc
+    await _require_workspace_manager(svc, user_id=user_id, client_id=client_id)
+    target = await _workspace_membership(
+        svc,
+        user_id=member_user_id,
+        client_id=client_id,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Workspace member not found")
+    if str(target.get("role") or "") == "owner":
+        raise HTTPException(status_code=409, detail="The workspace owner role cannot be changed")
+    await (
+        svc.table("workspace_memberships")
+        .update({"role": body.role, "updated_at": datetime.datetime.now(datetime.UTC).isoformat()})
+        .eq("client_id", str(client_id))
+        .eq("user_id", str(member_user_id))
+        .execute()
+    )
+    return {"user_id": str(member_user_id), "role": body.role}
+
+
+@app.delete("/workspaces/{client_id}/members/{member_user_id}", status_code=204)
+async def remove_workspace_member(
+    client_id: uuid.UUID,
+    member_user_id: uuid.UUID,
+    request: Request,
+) -> None:
+    user_id = await verify_token(extract_bearer(request))
+    svc: AsyncClient = request.app.state.svc
+    await _require_workspace_manager(svc, user_id=user_id, client_id=client_id)
+    target = await _workspace_membership(
+        svc,
+        user_id=member_user_id,
+        client_id=client_id,
+    )
+    if target is None:
+        return
+    if str(target.get("role") or "") == "owner":
+        raise HTTPException(status_code=409, detail="The workspace owner cannot be removed")
+    await (
+        svc.table("workspace_memberships")
+        .delete()
+        .eq("client_id", str(client_id))
+        .eq("user_id", str(member_user_id))
+        .execute()
+    )
 
 
 @app.get("/workspace/status")
