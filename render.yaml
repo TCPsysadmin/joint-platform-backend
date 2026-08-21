@@ -17,6 +17,14 @@ services:
         value: "https://api.x.ai/v1"
       - key: OPENAI_API_KEY
         sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
+        sync: false
+      - key: TRANSCRIPTION_API_URL
+        sync: false
+      - key: TRANSCRIPTION_API_KEY
+        sync: false
       - key: LANGCHAIN_TRACING_V2
         value: "false"
       - key: LANGCHAIN_API_KEY
