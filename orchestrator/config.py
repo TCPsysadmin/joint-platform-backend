@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     b2_key_id: str = ""
     b2_application_key: str = ""
 
+    # Server-to-server transcription access. Browser clients must never receive
+    # B2 credentials, so B2-link ingestion is proxied through this service.
+    transcription_api_url: str = ""
+    transcription_api_key: str = ""
+
     opusclip_api_key: str = ""
     opusclip_api_url: str = "https://api.opus.pro/api"
     # TTL for the signed B2 download URL handed to OpusClip so it can fetch the
