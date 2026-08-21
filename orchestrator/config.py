@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     b2_application_key: str = ""
     b2_workspace_bucket_prefix: str = "vpstorage"
 
+    # Server-to-server transcription access. Browser clients must never receive
+    # B2 credentials, so B2-link ingestion is proxied through this service.
+    transcription_api_url: str = ""
+    transcription_api_key: str = ""
+
     # Self-service storage provisioning. The webhook is an n8n workflow that
     # uses the existing Google Drive OAuth credential to create the intake and
     # completed folders beneath this TCP Shared Drive parent.

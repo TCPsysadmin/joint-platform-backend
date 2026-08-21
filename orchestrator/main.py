@@ -10,7 +10,9 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
+from urllib.parse import unquote, urlparse
 
+import httpx
 import structlog
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,6 +158,10 @@ class RegisterMediaStorageRequest(BaseModel):
     b2_bucket: str
     b2_path: str
     thumbnail_b2_path: str | None = None
+
+
+class B2LinkRequest(BaseModel):
+    media_url: str = Field(min_length=1, max_length=4096)
 
 
 # ── Exception handlers ─────────────────────────────────────────────────────────
@@ -799,6 +805,128 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
 
 
 # ── Media library endpoints ───────────────────────────────────────────────────
+
+
+def _parse_b2_friendly_url(media_url: str) -> tuple[str, str]:
+    """Return bucket and object path from a Backblaze friendly URL."""
+    parsed = urlparse(media_url.strip())
+    hostname = (parsed.hostname or "").lower()
+    parts = parsed.path.split("/")
+    if (
+        parsed.scheme != "https"
+        or not hostname.endswith(".backblazeb2.com")
+        or len(parts) < 4
+        or parts[1] != "file"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Invalid B2 URL. Expected https://f005.backblazeb2.com/file/BUCKET/path/to/file"
+            ),
+        )
+    bucket = unquote(parts[2]).strip()
+    object_path = unquote("/".join(parts[3:])).strip("/")
+    if not bucket or not object_path:
+        raise HTTPException(status_code=422, detail="B2 URL is missing a bucket or file path")
+    return bucket, object_path
+
+
+async def _validated_b2_link(
+    request: Request,
+    media_url: str,
+) -> tuple[str, str]:
+    """Authenticate the workspace and ensure the link belongs to its bucket."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+    bucket, object_path = _parse_b2_friendly_url(media_url)
+    response = (
+        await svc.table("clients_registry")
+        .select("b2_bucket")
+        .eq("client_id", str(runtime.client_id))
+        .maybe_single()
+        .execute()
+    )
+    row = as_dict(response.data if response else None)
+    configured_bucket = str((row or {}).get("b2_bucket") or "").strip()
+    if not configured_bucket:
+        raise HTTPException(status_code=409, detail="Workspace B2 bucket is not configured")
+    if bucket != configured_bucket:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "B2 bucket does not match this workspace: "
+                f"received '{bucket}', expected '{configured_bucket}'"
+            ),
+        )
+    return bucket, object_path
+
+
+def _transcription_config() -> tuple[str, str]:
+    api_url = settings.transcription_api_url.strip().rstrip("/")
+    api_key = settings.transcription_api_key.strip()
+    if not api_url or not api_key or not settings.b2_key_id or not settings.b2_application_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Server-side B2 link ingestion is not configured",
+        )
+    return api_url, api_key
+
+
+async def _transcription_request(path: str, payload: dict[str, str]) -> dict[str, Any]:
+    api_url, api_key = _transcription_config()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            response = await http.post(
+                f"{api_url}{path}",
+                headers={"X-API-KEY": api_key},
+                json={
+                    **payload,
+                    "b2_key_id": settings.b2_key_id,
+                    "b2_application_key": settings.b2_application_key,
+                },
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("b2_link_upstream_unavailable", path=path, error=str(exc))
+        raise HTTPException(status_code=502, detail="Transcription service is unavailable") from exc
+    if response.is_error:
+        try:
+            detail = str(response.json().get("detail") or response.text)
+        except (ValueError, AttributeError):
+            detail = response.text
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=detail or "B2 link request failed",
+        )
+    data = response.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Invalid response from transcription service")
+    return data
+
+
+@app.post("/ingestion/b2/media")
+async def submit_b2_media(body: B2LinkRequest, request: Request) -> dict[str, Any]:
+    """Submit tenant-owned B2 media without exposing storage credentials."""
+    bucket, object_path = await _validated_b2_link(request, body.media_url)
+    result = await _transcription_request("/transcribeHTTP", {"media_url": body.media_url})
+    job_id = str(result.get("job_id") or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=502, detail="Transcription service returned no job ID")
+    return {
+        "job_id": job_id,
+        "b2_bucket": bucket,
+        "b2_path": object_path,
+    }
+
+
+@app.post("/ingestion/b2/text")
+async def fetch_b2_text(body: B2LinkRequest, request: Request) -> dict[str, Any]:
+    """Read a tenant-owned B2 transcript without exposing storage credentials."""
+    bucket, object_path = await _validated_b2_link(request, body.media_url)
+    result = await _transcription_request("/fetchText", {"media_url": body.media_url})
+    text = result.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=502, detail="Transcription service returned no text")
+    return {"text": text, "b2_bucket": bucket, "b2_path": object_path}
 
 
 @app.get("/ingestion/config")
