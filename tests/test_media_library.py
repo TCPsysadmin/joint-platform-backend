@@ -114,7 +114,8 @@ def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
             "summary_text": "A conversation about product growth.",
             "topics": ["growth"],
             "speakers": ["Alex"],
-        }
+        },
+        transcript_segment_count=3,
     )
 
     assert payload["kind"] == "video_folder"
@@ -122,6 +123,16 @@ def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
     assert payload["thumbnail"]["url"].endswith("founder.jpg")
     assert payload["video"]["source_file"] == "founder.mp4"
     assert payload["summary"]["topics"] == ["growth"]
+    assert payload["transcript"] == {"available": True, "segment_count": 3}
+
+
+def test_folder_payload_reports_a_missing_transcript() -> None:
+    payload = media_library._folder_payload(
+        {"source_video_id": "summary-only", "summary_text": "Existing summary"},
+        transcript_segment_count=0,
+    )
+
+    assert payload["transcript"] == {"available": False, "segment_count": 0}
 
 
 @pytest.mark.asyncio

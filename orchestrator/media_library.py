@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from collections import Counter
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +14,7 @@ _VIDEO_COLUMNS = (
     "duration_seconds, recorded_at, summary_text, topics, speakers, "
     "quality_score, b2_path, thumbnail_url, thumbnail_b2_path, created_at, updated_at"
 )
+_TRANSCRIPT_STATUS_PAGE_SIZE = 1000
 
 
 async def list_videos(
@@ -32,7 +34,18 @@ async def list_videos(
         .execute()
     )
     rows = response.data if response and isinstance(response.data, list) else []
-    return [_folder_payload(row) for row in rows if isinstance(row, dict)]
+    videos = [row for row in rows if isinstance(row, dict)]
+    segment_counts = await _transcript_segment_counts(
+        svc,
+        client_id=client_id,
+        source_video_ids=[str(row.get("source_video_id") or "") for row in videos],
+    )
+    return [
+        _folder_payload(
+            row, transcript_segment_count=segment_counts[str(row.get("source_video_id"))]
+        )
+        for row in videos
+    ]
 
 
 async def get_video(
@@ -73,6 +86,7 @@ async def get_video(
 
     payload = _folder_payload(video)
     payload["transcript"] = {
+        "available": bool(segments),
         "segment_count": len(segments),
         "segments": segments,
         "text": "\n\n".join(
@@ -135,9 +149,44 @@ def _object_path(value: str, *, field: str) -> str:
     return path
 
 
-def _folder_payload(row: dict[str, Any]) -> dict[str, Any]:
+async def _transcript_segment_counts(
+    svc: AsyncClient,
+    *,
+    client_id: UUID,
+    source_video_ids: list[str],
+) -> Counter[str]:
+    """Count transcript chunks for a page of videos without per-video queries."""
+    source_ids = sorted({source_id for source_id in source_video_ids if source_id})
+    counts: Counter[str] = Counter()
+    if not source_ids:
+        return counts
+
+    offset = 0
+    while True:
+        response = (
+            await svc.table("transcript_segments")
+            .select("segment_id,source_video_id")
+            .eq("client_id", str(client_id))
+            .in_("source_video_id", source_ids)
+            .order("segment_id")
+            .range(offset, offset + _TRANSCRIPT_STATUS_PAGE_SIZE - 1)
+            .execute()
+        )
+        rows = response.data if response and isinstance(response.data, list) else []
+        for row in rows:
+            if isinstance(row, dict) and row.get("source_video_id"):
+                counts[str(row["source_video_id"])] += 1
+        if len(rows) < _TRANSCRIPT_STATUS_PAGE_SIZE:
+            break
+        offset += _TRANSCRIPT_STATUS_PAGE_SIZE
+    return counts
+
+
+def _folder_payload(
+    row: dict[str, Any], *, transcript_segment_count: int | None = None
+) -> dict[str, Any]:
     source_video_id = str(row.get("source_video_id") or "")
-    return {
+    payload = {
         "id": source_video_id,
         "kind": "video_folder",
         "name": row.get("title") or row.get("source_file") or source_video_id,
@@ -162,3 +211,9 @@ def _folder_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+    if transcript_segment_count is not None:
+        payload["transcript"] = {
+            "available": transcript_segment_count > 0,
+            "segment_count": transcript_segment_count,
+        }
+    return payload
