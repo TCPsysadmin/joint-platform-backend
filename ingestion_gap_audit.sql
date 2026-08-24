@@ -12,10 +12,20 @@ segment_counts as (
     from public.transcript_segments ts
     join target_client tc using (client_id)
     group by ts.client_id, ts.source_video_id
+),
+all_sources as (
+    select vs.client_id, vs.source_video_id
+    from public.video_summaries vs
+    join target_client tc using (client_id)
+
+    union
+
+    select sc.client_id, sc.source_video_id
+    from segment_counts sc
 )
 select
     tc.display_name as workspace,
-    vs.source_video_id,
+    src.source_video_id,
     vs.title,
     vs.source_file,
     vs.b2_path,
@@ -31,14 +41,17 @@ select
             then 'missing summary'
     end as gap,
     vs.updated_at
-from public.video_summaries vs
+from all_sources src
 join target_client tc using (client_id)
+left join public.video_summaries vs
+    on vs.client_id = src.client_id
+   and vs.source_video_id = src.source_video_id
 left join segment_counts sc
-    on sc.client_id = vs.client_id
-   and sc.source_video_id = vs.source_video_id
+    on sc.client_id = src.client_id
+   and sc.source_video_id = src.source_video_id
 where coalesce(sc.segment_count, 0) = 0
    or nullif(length(trim(vs.summary_text)), 0) is null
-order by gap, vs.updated_at, vs.source_video_id;
+order by gap, vs.updated_at, src.source_video_id;
 
 -- Recent failed scheduled-ingestion jobs. These explain processing failures,
 -- while the first result set shows the current data that still needs repair.
