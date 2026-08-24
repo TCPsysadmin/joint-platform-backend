@@ -884,25 +884,40 @@ async def list_media(
     request: Request,
     limit: int = 50,
     offset: int = 0,
+    search: str | None = None,
+    sort: str = "updated-desc",
+    content_filter: str = "all",
 ) -> dict[str, Any]:
     """List the authenticated tenant's videos as Drive-style folder cards."""
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     if offset < 0:
         raise HTTPException(status_code=422, detail="offset must be non-negative")
+    if sort not in {"updated-desc", "updated-asc", "name-asc", "name-desc"}:
+        raise HTTPException(status_code=422, detail="Unsupported media sort")
+    if content_filter not in {
+        "all",
+        "complete",
+        "missing-transcript",
+        "missing-summary",
+    }:
+        raise HTTPException(status_code=422, detail="Unsupported media content filter")
 
     svc: AsyncClient = request.app.state.svc
     runtime = await resolve_runtime(request, svc)
-    items = await media_library.list_videos(
+    items, total = await media_library.list_videos(
         svc,
         client_id=runtime.client_id,
         limit=limit,
         offset=offset,
+        search=search,
+        sort=sort,
+        content_filter=content_filter,
     )
     await _attach_signed_thumbnail_urls(runtime, items)
     return {
         "items": items,
-        "count": len(items),
+        "count": total,
         "limit": limit,
         "offset": offset,
     }

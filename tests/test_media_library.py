@@ -144,20 +144,46 @@ async def test_list_media_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> N
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
         headers={"authorization": "Bearer token"},
     )
-    list_videos = AsyncMock(return_value=[{"id": "vid-123"}])
+    list_videos = AsyncMock(return_value=([{"id": "vid-123"}], 42))
 
     monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
     monkeypatch.setattr(main.media_library, "list_videos", list_videos)
 
-    response = await main.list_media(request, limit=25, offset=10)  # type: ignore[arg-type]
+    response = await main.list_media(
+        request,
+        limit=25,
+        offset=10,
+        search="founder",
+        sort="name-asc",
+        content_filter="missing-summary",
+    )  # type: ignore[arg-type]
 
     assert response["items"] == [{"id": "vid-123"}]
-    assert response["count"] == 1
+    assert response["count"] == 42
     list_videos.assert_awaited_once_with(
         svc,
         client_id=FAKE_CLIENT_ID,
         limit=25,
         offset=10,
+        search="founder",
+        sort="name-asc",
+        content_filter="missing-summary",
+    )
+
+
+def test_media_content_filters_use_transcript_and_summary_availability() -> None:
+    complete = {"summary_text": "Summary"}
+    summary_only = {"summary_text": "Summary"}
+    transcript_only = {"summary_text": None}
+
+    assert media_library._matches_content_filter(
+        complete, transcript_segment_count=2, content_filter="complete"
+    )
+    assert media_library._matches_content_filter(
+        summary_only, transcript_segment_count=0, content_filter="missing-transcript"
+    )
+    assert media_library._matches_content_filter(
+        transcript_only, transcript_segment_count=2, content_filter="missing-summary"
     )
 
 
