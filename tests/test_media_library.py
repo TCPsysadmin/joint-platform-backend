@@ -119,7 +119,8 @@ def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
             "summary_text": "A conversation about product growth.",
             "topics": ["growth"],
             "speakers": ["Alex"],
-        }
+        },
+        transcript_segment_count=3,
     )
 
     assert payload["kind"] == "video_folder"
@@ -127,6 +128,16 @@ def test_folder_payload_groups_video_summary_and_thumbnail() -> None:
     assert payload["thumbnail"]["url"].endswith("founder.jpg")
     assert payload["video"]["source_file"] == "founder.mp4"
     assert payload["summary"]["topics"] == ["growth"]
+    assert payload["transcript"] == {"available": True, "segment_count": 3}
+
+
+def test_folder_payload_reports_a_missing_transcript() -> None:
+    payload = media_library._folder_payload(
+        {"source_video_id": "summary-only", "summary_text": "Existing summary"},
+        transcript_segment_count=0,
+    )
+
+    assert payload["transcript"] == {"available": False, "segment_count": 0}
 
 
 @pytest.mark.asyncio
@@ -138,20 +149,46 @@ async def test_list_media_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> N
         app=SimpleNamespace(state=SimpleNamespace(svc=svc)),
         headers={"authorization": "Bearer token"},
     )
-    list_videos = AsyncMock(return_value=[{"id": "vid-123"}])
+    list_videos = AsyncMock(return_value=([{"id": "vid-123"}], 42))
 
     monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
     monkeypatch.setattr(main.media_library, "list_videos", list_videos)
 
-    response = await main.list_media(request, limit=25, offset=10)  # type: ignore[arg-type]
+    response = await main.list_media(
+        request,
+        limit=25,
+        offset=10,
+        search="founder",
+        sort="name-asc",
+        content_filter="missing-summary",
+    )  # type: ignore[arg-type]
 
     assert response["items"] == [{"id": "vid-123"}]
-    assert response["count"] == 1
+    assert response["count"] == 42
     list_videos.assert_awaited_once_with(
         svc,
         client_id=FAKE_CLIENT_ID,
         limit=25,
         offset=10,
+        search="founder",
+        sort="name-asc",
+        content_filter="missing-summary",
+    )
+
+
+def test_media_content_filters_use_transcript_and_summary_availability() -> None:
+    complete = {"summary_text": "Summary"}
+    summary_only = {"summary_text": "Summary"}
+    transcript_only = {"summary_text": None}
+
+    assert media_library._matches_content_filter(
+        complete, transcript_segment_count=2, content_filter="complete"
+    )
+    assert media_library._matches_content_filter(
+        summary_only, transcript_segment_count=0, content_filter="missing-transcript"
+    )
+    assert media_library._matches_content_filter(
+        transcript_only, transcript_segment_count=2, content_filter="missing-summary"
     )
 
 

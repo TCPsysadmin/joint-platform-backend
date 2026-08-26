@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime
+from collections import Counter
 from typing import Any
 from uuid import UUID
 
+from postgrest import CountMethod
 from supabase import AsyncClient
 
 from orchestrator.supabase_json import as_dict
@@ -14,6 +16,7 @@ _VIDEO_COLUMNS = (
     "quality_score, b2_path, thumbnail_url, thumbnail_b2_path, "
     "uploaded_by_user_id, uploaded_by_email, created_at, updated_at"
 )
+_TRANSCRIPT_STATUS_PAGE_SIZE = 1000
 
 
 async def list_videos(
@@ -22,18 +25,126 @@ async def list_videos(
     client_id: UUID,
     limit: int = 50,
     offset: int = 0,
-) -> list[dict[str, Any]]:
+    search: str | None = None,
+    sort: str = "updated-desc",
+    content_filter: str = "all",
+) -> tuple[list[dict[str, Any]], int]:
     """Return one lightweight library-folder record per source video."""
-    response = (
-        await svc.table("video_summaries")
-        .select(_VIDEO_COLUMNS)
-        .eq("client_id", str(client_id))
-        .order("updated_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
+    if content_filter == "all":
+        query = _video_query(
+            svc,
+            client_id=client_id,
+            search=search,
+            sort=sort,
+            exact_count=True,
+        )
+        response = await query.range(offset, offset + limit - 1).execute()
+        rows = response.data if response and isinstance(response.data, list) else []
+        videos = [row for row in rows if isinstance(row, dict)]
+        total = response.count if response and isinstance(response.count, int) else len(videos)
+    else:
+        # Transcript availability lives in transcript_segments rather than
+        # video_summaries. Scan lightweight database pages on the server so the
+        # browser still receives only the requested page and an accurate total.
+        candidates: list[dict[str, Any]] = []
+        page_offset = 0
+        while True:
+            query = _video_query(
+                svc,
+                client_id=client_id,
+                search=search,
+                sort=sort,
+                exact_count=False,
+            )
+            response = await query.range(
+                page_offset, page_offset + _TRANSCRIPT_STATUS_PAGE_SIZE - 1
+            ).execute()
+            rows = response.data if response and isinstance(response.data, list) else []
+            candidates.extend(row for row in rows if isinstance(row, dict))
+            if len(rows) < _TRANSCRIPT_STATUS_PAGE_SIZE:
+                break
+            page_offset += _TRANSCRIPT_STATUS_PAGE_SIZE
+
+        candidate_counts = await _transcript_segment_counts(
+            svc,
+            client_id=client_id,
+            source_video_ids=[str(row.get("source_video_id") or "") for row in candidates],
+        )
+        filtered = [
+            row
+            for row in candidates
+            if _matches_content_filter(
+                row,
+                transcript_segment_count=candidate_counts[str(row.get("source_video_id") or "")],
+                content_filter=content_filter,
+            )
+        ]
+        total = len(filtered)
+        videos = filtered[offset : offset + limit]
+
+    segment_counts = await _transcript_segment_counts(
+        svc,
+        client_id=client_id,
+        source_video_ids=[str(row.get("source_video_id") or "") for row in videos],
     )
-    rows = response.data if response and isinstance(response.data, list) else []
-    return [_folder_payload(row) for row in rows if isinstance(row, dict)]
+    return (
+        [
+            _folder_payload(
+                row,
+                transcript_segment_count=segment_counts[str(row.get("source_video_id"))],
+            )
+            for row in videos
+        ],
+        total,
+    )
+
+
+def _video_query(
+    svc: AsyncClient,
+    *,
+    client_id: UUID,
+    search: str | None,
+    sort: str,
+    exact_count: bool,
+) -> Any:
+    table = svc.table("video_summaries")
+    query = (
+        table.select(_VIDEO_COLUMNS, count=CountMethod.exact)
+        if exact_count
+        else table.select(_VIDEO_COLUMNS)
+    )
+    query = query.eq("client_id", str(client_id))
+    needle = (search or "").strip()
+    if needle:
+        # PostgREST's `or` expression treats commas as separators. Quoted
+        # patterns keep punctuation in filenames from changing the filter.
+        pattern = needle.replace("\\", "\\\\").replace('"', '\\"')
+        query = query.or_(
+            ",".join(
+                f'{column}.ilike."*{pattern}*"'
+                for column in ("title", "source_file", "source_video_id", "summary_text")
+            )
+        )
+
+    if sort == "name-asc":
+        return query.order("title", desc=False).order("source_video_id", desc=False)
+    if sort == "name-desc":
+        return query.order("title", desc=True).order("source_video_id", desc=True)
+    return query.order("updated_at", desc=sort != "updated-asc")
+
+
+def _matches_content_filter(
+    row: dict[str, Any], *, transcript_segment_count: int, content_filter: str
+) -> bool:
+    has_transcript = transcript_segment_count > 0
+    has_summary = bool(str(row.get("summary_text") or "").strip())
+    if content_filter == "complete":
+        return has_transcript and has_summary
+    if content_filter == "missing-transcript":
+        return not has_transcript
+    if content_filter == "missing-summary":
+        return not has_summary
+    return True
 
 
 async def get_video(
@@ -74,6 +185,7 @@ async def get_video(
 
     payload = _folder_payload(video)
     payload["transcript"] = {
+        "available": bool(segments),
         "segment_count": len(segments),
         "segments": segments,
         "text": "\n\n".join(
@@ -141,9 +253,44 @@ def _object_path(value: str, *, field: str) -> str:
     return path
 
 
-def _folder_payload(row: dict[str, Any]) -> dict[str, Any]:
+async def _transcript_segment_counts(
+    svc: AsyncClient,
+    *,
+    client_id: UUID,
+    source_video_ids: list[str],
+) -> Counter[str]:
+    """Count transcript chunks for a page of videos without per-video queries."""
+    source_ids = sorted({source_id for source_id in source_video_ids if source_id})
+    counts: Counter[str] = Counter()
+    if not source_ids:
+        return counts
+
+    offset = 0
+    while True:
+        response = (
+            await svc.table("transcript_segments")
+            .select("segment_id,source_video_id")
+            .eq("client_id", str(client_id))
+            .in_("source_video_id", source_ids)
+            .order("segment_id")
+            .range(offset, offset + _TRANSCRIPT_STATUS_PAGE_SIZE - 1)
+            .execute()
+        )
+        rows = response.data if response and isinstance(response.data, list) else []
+        for row in rows:
+            if isinstance(row, dict) and row.get("source_video_id"):
+                counts[str(row["source_video_id"])] += 1
+        if len(rows) < _TRANSCRIPT_STATUS_PAGE_SIZE:
+            break
+        offset += _TRANSCRIPT_STATUS_PAGE_SIZE
+    return counts
+
+
+def _folder_payload(
+    row: dict[str, Any], *, transcript_segment_count: int | None = None
+) -> dict[str, Any]:
     source_video_id = str(row.get("source_video_id") or "")
-    return {
+    payload = {
         "id": source_video_id,
         "kind": "video_folder",
         "name": row.get("title") or row.get("source_file") or source_video_id,
@@ -172,3 +319,9 @@ def _folder_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+    if transcript_segment_count is not None:
+        payload["transcript"] = {
+            "available": transcript_segment_count > 0,
+            "segment_count": transcript_segment_count,
+        }
+    return payload
