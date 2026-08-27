@@ -193,7 +193,14 @@ begin
         (select email from auth.users where id = new.user_id)
     )
     on conflict (client_id, user_id) do update set
+        role = case
+          -- Ownership is managed by the multi-workspace model and must not be
+          -- downgraded by a later write to the legacy user_profiles row.
+          when workspace_memberships.role = 'owner' then 'owner'
+          else excluded.role
+        end,
         display_name = excluded.display_name,
+        email = coalesce(excluded.email, workspace_memberships.email),
         updated_at = now();
     return new;
 end;
