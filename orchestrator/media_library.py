@@ -8,7 +8,7 @@ from uuid import UUID
 from postgrest import CountMethod
 from supabase import AsyncClient
 
-from orchestrator.supabase_json import as_dict
+from orchestrator.supabase_json import as_dict, as_dict_list
 
 _VIDEO_COLUMNS = (
     "summary_id, source_video_id, title, source_file, has_timestamps, "
@@ -242,6 +242,63 @@ async def register_storage(
     rows = response.data if response and isinstance(response.data, list) else []
     row = next((candidate for candidate in rows if isinstance(candidate, dict)), payload)
     return _folder_payload(row)
+
+
+async def get_media_storage_records(
+    svc: AsyncClient,
+    *,
+    client_id: UUID,
+    source_video_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Return selected storage metadata in request order, scoped to one tenant."""
+    response = (
+        await svc.table("video_summaries")
+        .select("source_video_id,b2_path,thumbnail_b2_path")
+        .eq("client_id", str(client_id))
+        .in_("source_video_id", source_video_ids)
+        .execute()
+    )
+    rows = as_dict_list(response.data if response is not None else None)
+    by_id = {str(row.get("source_video_id") or ""): row for row in rows}
+    return [by_id[source_id] for source_id in source_video_ids if source_id in by_id]
+
+
+async def delete_media_records(
+    svc: AsyncClient,
+    *,
+    client_id: UUID,
+    source_video_ids: list[str],
+) -> int:
+    """Atomically remove selected media, manifests, and transcript segments."""
+    response = await svc.rpc(
+        "admin_delete_media",
+        {
+            "p_client_id": str(client_id),
+            "p_source_video_ids": source_video_ids,
+        },
+    ).execute()
+    return int(response.data or 0) if response is not None else 0
+
+
+async def move_media_records(
+    svc: AsyncClient,
+    *,
+    source_client_id: UUID,
+    destination_client_id: UUID,
+    source_video_ids: list[str],
+    destination_b2_bucket: str,
+) -> int:
+    """Atomically transfer selected media and indexed text to another tenant."""
+    response = await svc.rpc(
+        "admin_move_media",
+        {
+            "p_source_client_id": str(source_client_id),
+            "p_destination_client_id": str(destination_client_id),
+            "p_source_video_ids": source_video_ids,
+            "p_destination_b2_bucket": destination_b2_bucket,
+        },
+    ).execute()
+    return int(response.data or 0) if response is not None else 0
 
 
 def _object_path(value: str, *, field: str) -> str:

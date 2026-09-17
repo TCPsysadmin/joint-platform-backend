@@ -208,6 +208,148 @@ class B2FileTool:
             return None
         return buckets[0].bucket_id
 
+    @staticmethod
+    def _clean_relative_path(raw_path: str) -> str:
+        path = str(raw_path or "").strip()
+        if path.startswith("/") or "\\" in path:
+            raise ValueError("B2 paths must be relative to the workspace")
+        normalized = posixpath.normpath(path)
+        if not path or normalized in {".", ".."} or normalized.startswith("../"):
+            raise ValueError("B2 path contains an invalid path segment")
+        return normalized
+
+    @staticmethod
+    def _storage_path(prefix: str, relative_path: str) -> str:
+        return f"{prefix.strip('/')}/{relative_path}".lstrip("/") if prefix else relative_path
+
+    async def copy_path_to_storage(
+        self,
+        relative_path: str,
+        *,
+        destination_bucket: str,
+        destination_prefix: str = "",
+    ) -> bool:
+        """Server-side copy one tenant-relative object into another workspace.
+
+        Returns ``False`` when both workspaces share the exact same storage
+        location, otherwise ``True`` after B2 confirms the copy.
+        """
+        clean_path = self._clean_relative_path(relative_path)
+        source = await self._get_client_storage()
+        if source is None:
+            raise ValueError("Source workspace B2 storage is not configured")
+        source_bucket = source["bucket"]
+        source_prefix = source.get("prefix") or ""
+        destination_prefix = destination_prefix.strip("/")
+        if source_bucket == destination_bucket and source_prefix == destination_prefix:
+            return False
+
+        source_bucket_id = await self._resolve_bucket_id(source_bucket)
+        destination_bucket_id = await self._resolve_bucket_id(destination_bucket)
+        if not source_bucket_id or not destination_bucket_id:
+            raise ValueError("Source or destination B2 bucket was not found")
+
+        source_path = self._storage_path(source_prefix, clean_path)
+        entries, _ = await self.list_file_names(
+            bucket_id=source_bucket_id,
+            prefix=source_path,
+            max_file_count=1,
+        )
+        source_entry = next(
+            (
+                entry
+                for entry in entries
+                if entry.action == "upload" and entry.file_name == source_path
+            ),
+            None,
+        )
+        if source_entry is None or not source_entry.file_id:
+            raise FileNotFoundError(f"B2 object was not found: {clean_path}")
+
+        destination_path = self._storage_path(destination_prefix, clean_path)
+        auth = await self._authorize()
+        url = f"{auth['apiUrl']}/b2api/v3/b2_copy_file"
+        async with httpx.AsyncClient(timeout=120.0) as http:
+            response = await http.post(
+                url,
+                json={
+                    "sourceFileId": source_entry.file_id,
+                    "destinationBucketId": destination_bucket_id,
+                    "fileName": destination_path,
+                    "metadataDirective": "COPY",
+                },
+                headers=await self._headers(),
+            )
+            response.raise_for_status()
+        logger.info(
+            "b2_object_copied",
+            source_bucket=source_bucket,
+            destination_bucket=destination_bucket,
+            path=clean_path,
+        )
+        return True
+
+    async def delete_paths_from_storage(
+        self,
+        relative_paths: list[str],
+        *,
+        bucket_name: str | None = None,
+        prefix: str | None = None,
+    ) -> list[str]:
+        """Permanently delete every version of exact tenant-relative objects."""
+        storage = await self._get_client_storage()
+        if storage is None and not bucket_name:
+            raise ValueError("Workspace B2 storage is not configured")
+        resolved_bucket = bucket_name or str((storage or {})["bucket"])
+        resolved_prefix = (
+            prefix.strip("/")
+            if prefix is not None
+            else str((storage or {}).get("prefix") or "").strip("/")
+        )
+        bucket_id = await self._resolve_bucket_id(resolved_bucket)
+        if not bucket_id:
+            raise ValueError(f"B2 bucket was not found: {resolved_bucket}")
+
+        deleted: list[str] = []
+        auth = await self._authorize()
+        headers = await self._headers()
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            for raw_path in dict.fromkeys(relative_paths):
+                clean_path = self._clean_relative_path(raw_path)
+                full_path = self._storage_path(resolved_prefix, clean_path)
+                versions: list[B2FileEntry] = []
+                next_name: str | None = None
+                next_id: str | None = None
+                for _ in range(20):
+                    page, next_name, next_id = await self.list_file_versions(
+                        bucket_id=bucket_id,
+                        prefix=full_path,
+                        start_file_name=next_name,
+                        start_file_id=next_id,
+                        max_file_count=1000,
+                    )
+                    versions.extend(entry for entry in page if entry.file_name == full_path)
+                    if not next_name or next_name != full_path:
+                        break
+
+                for entry in versions:
+                    if not entry.file_id:
+                        continue
+                    response = await http.post(
+                        f"{auth['apiUrl']}/b2api/v3/b2_delete_file_version",
+                        json={"fileName": full_path, "fileId": entry.file_id},
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                deleted.append(clean_path)
+
+        logger.info(
+            "b2_objects_deleted",
+            bucket=resolved_bucket,
+            paths=len(deleted),
+        )
+        return deleted
+
     # ------------------------------------------------------------------
     # b2_list_file_names (GET) — query params
     # ------------------------------------------------------------------

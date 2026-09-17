@@ -165,6 +165,7 @@ class FakeB2:
         fail_count: int = 1,
         synthetic_page_count: int | None = None,
         files_per_page: int = 5,
+        versions: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         self.pages = pages if pages is not None else DEFAULT_PAGES
         self.downloads = downloads or {}
@@ -183,11 +184,13 @@ class FakeB2:
         # page cap rather than running out of fixture data first.
         self.synthetic_page_count = synthetic_page_count
         self.files_per_page = files_per_page
+        self.versions = versions or {}
         self.requests: list[httpx.Request] = []
         self.auth_calls = 0
         self.list_calls = 0
         self.download_calls = 0
         self.sign_calls = 0
+        self.delete_calls: list[dict[str, str]] = []
 
     @property
     def token(self) -> str:
@@ -252,6 +255,20 @@ class FakeB2:
                     return httpx.Response(500, json={"status": 500, "code": "internal_error"})
             return httpx.Response(200, json=self.pages[min(index, len(self.pages) - 1)])
 
+        if "b2_list_file_versions" in url:
+            prefix = parse_qs(urlparse(url).query).get("prefix", [""])[0]
+            return httpx.Response(
+                200,
+                json={"files": self.versions.get(prefix, []), "nextFileName": None},
+            )
+
+        if "b2_delete_file_version" in url:
+            payload = json.loads(request.content)
+            self.delete_calls.append(
+                {"fileName": str(payload["fileName"]), "fileId": str(payload["fileId"])}
+            )
+            return httpx.Response(200, json=payload)
+
         if "/file/" in url:
             self.download_calls += 1
             if self.expire_first_token and request.headers.get("Authorization") == "token-1":
@@ -308,6 +325,64 @@ def _tool(
 
 def test_b2_file_tool_still_satisfies_the_file_tool_protocol(tmp_path: Path) -> None:
     assert isinstance(_tool(tmp_path), FileTool)
+
+
+@pytest.mark.asyncio
+async def test_delete_paths_removes_every_version_inside_the_workspace_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_path = "tenant-a/videos/video-1.mp4"
+    thumbnail_path = "tenant-a/thumbnails/video-1.webp"
+    fake = FakeB2(
+        versions={
+            video_path: [
+                _file_row(video_path, ts=2_000, content_type="video/mp4"),
+                {
+                    **_file_row(video_path, ts=1_000, content_type="video/mp4"),
+                    "fileId": "old-video-version",
+                },
+            ],
+            thumbnail_path: [
+                _file_row(thumbnail_path, ts=2_000, content_type="image/webp")
+            ],
+        }
+    )
+    _install(monkeypatch, fake)
+    supabase = _FakeSupabase(
+        clients_registry=[
+            {
+                "client_id": str(FAKE_CLIENT_ID),
+                "b2_bucket": BUCKET,
+                "b2_prefix": "tenant-a",
+            }
+        ]
+    )
+    tool = _tool(tmp_path, supabase=supabase)
+
+    deleted = await tool.delete_paths_from_storage(
+        ["videos/video-1.mp4", "thumbnails/video-1.webp"]
+    )
+
+    assert deleted == ["videos/video-1.mp4", "thumbnails/video-1.webp"]
+    assert fake.delete_calls == [
+        {"fileName": video_path, "fileId": f"id-{video_path}"},
+        {"fileName": video_path, "fileId": "old-video-version"},
+        {"fileName": thumbnail_path, "fileId": f"id-{thumbnail_path}"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_paths_rejects_paths_outside_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeB2()
+    _install(monkeypatch, fake)
+    tool = _tool(tmp_path)
+
+    with pytest.raises(ValueError, match="invalid path segment"):
+        await tool.delete_paths_from_storage(["../other-workspace/video.mp4"])
+
+    assert fake.delete_calls == []
 
 
 @pytest.mark.asyncio

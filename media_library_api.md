@@ -97,3 +97,33 @@ Returns a short-lived, tenant-scoped B2 download URL:
   "expires_in": 86400
 }
 ```
+
+## Delete videos
+
+`POST /media/bulk-delete`
+
+Workspace owners and admins can permanently delete up to 100 videos at once:
+
+```json
+{
+  "source_video_ids": ["video-123", "video-456"]
+}
+```
+
+The operation is tenant-scoped. It first removes the source videos and private
+thumbnails from the workspace's B2 storage, then atomically deletes their
+ingestion manifests, transcript segments, and summary rows. Completed Google
+Drive transcript and summary exports are retained as recovery copies.
+
+If storage cleanup fails, the endpoint returns `502` and leaves the database
+records in place so the deletion can be retried. A successful response is:
+
+```json
+{
+  "deleted": 2,
+  "source_video_ids": ["video-123", "video-456"],
+  "warnings": []
+}
+```
+
+Run `media_management_migration.sql` in Supabase before deploying this endpoint.

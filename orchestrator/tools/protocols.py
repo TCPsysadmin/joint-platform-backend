@@ -290,6 +290,22 @@ class FileTool(Protocol):
         max_file_count: int = 100,
     ) -> tuple[list[B2FileEntry], str | None, str | None]: ...
 
+    async def copy_path_to_storage(
+        self,
+        relative_path: str,
+        *,
+        destination_bucket: str,
+        destination_prefix: str = "",
+    ) -> bool: ...
+
+    async def delete_paths_from_storage(
+        self,
+        relative_paths: list[str],
+        *,
+        bucket_name: str | None = None,
+        prefix: str | None = None,
+    ) -> list[str]: ...
+
     async def list_keys(
         self,
         *,

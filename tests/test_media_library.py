@@ -8,6 +8,8 @@ import pytest
 from orchestrator import main, media_library
 from tests.conftest import FAKE_CLIENT_ID
 
+DESTINATION_CLIENT_ID = "11111111-2222-4333-8444-555555555555"
+
 
 def _query_response(data: dict[str, object]) -> MagicMock:
     response = MagicMock()
@@ -261,3 +263,158 @@ async def test_get_media_video_url_is_tenant_scoped(
         source_video_id="vid-123",
     )
     file_tool.get_download_url.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_media_requires_manager_and_cleans_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc = object()
+    file_tool = SimpleNamespace(delete_paths_from_storage=AsyncMock(return_value=[]))
+    runtime = SimpleNamespace(
+        client_id=FAKE_CLIENT_ID,
+        user_id="user-id",
+        file_tool=file_tool,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(svc=svc)))
+    records = [
+        {
+            "source_video_id": "video-1",
+            "b2_path": "videos/video-1.mp4",
+            "thumbnail_b2_path": "thumbnails/video-1.webp",
+        }
+    ]
+    get_records = AsyncMock(return_value=records)
+    delete_records = AsyncMock(return_value=1)
+    require_manager = AsyncMock(return_value={"role": "admin"})
+    monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(main, "_require_workspace_manager", require_manager)
+    monkeypatch.setattr(main.media_library, "get_media_storage_records", get_records)
+    monkeypatch.setattr(main.media_library, "delete_media_records", delete_records)
+
+    result = await main.bulk_delete_media(
+        main.BulkMediaDeleteRequest(source_video_ids=["video-1"]),
+        request,  # type: ignore[arg-type]
+    )
+
+    assert result == {"deleted": 1, "source_video_ids": ["video-1"], "warnings": []}
+    require_manager.assert_awaited_once()
+    delete_records.assert_awaited_once_with(
+        svc,
+        client_id=FAKE_CLIENT_ID,
+        source_video_ids=["video-1"],
+    )
+    file_tool.delete_paths_from_storage.assert_awaited_once_with(
+        ["videos/video-1.mp4", "thumbnails/video-1.webp"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_media_keeps_database_records_when_storage_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc = object()
+    file_tool = SimpleNamespace(
+        delete_paths_from_storage=AsyncMock(side_effect=RuntimeError("B2 unavailable"))
+    )
+    runtime = SimpleNamespace(
+        client_id=FAKE_CLIENT_ID,
+        user_id="user-id",
+        file_tool=file_tool,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(svc=svc)))
+    records = [
+        {
+            "source_video_id": "video-1",
+            "b2_path": "videos/video-1.mp4",
+            "thumbnail_b2_path": "thumbnails/video-1.webp",
+        }
+    ]
+    delete_records = AsyncMock(return_value=1)
+    monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(main, "_require_workspace_manager", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        main.media_library,
+        "get_media_storage_records",
+        AsyncMock(return_value=records),
+    )
+    monkeypatch.setattr(main.media_library, "delete_media_records", delete_records)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.bulk_delete_media(
+            main.BulkMediaDeleteRequest(source_video_ids=["video-1"]),
+            request,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == (
+        "Could not delete the selected videos from storage. Please retry."
+    )
+    delete_records.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bulk_move_media_copies_storage_then_moves_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination_response = MagicMock()
+    destination_response.data = {
+        "client_id": DESTINATION_CLIENT_ID,
+        "b2_bucket": "destination-bucket",
+        "b2_prefix": "workspace",
+        "status": "active",
+    }
+    query = MagicMock()
+    query.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute = (
+        AsyncMock(return_value=destination_response)
+    )
+    svc = MagicMock()
+    svc.table.return_value = query
+    file_tool = SimpleNamespace(
+        copy_path_to_storage=AsyncMock(return_value=True),
+        delete_paths_from_storage=AsyncMock(return_value=[]),
+    )
+    runtime = SimpleNamespace(
+        client_id=FAKE_CLIENT_ID,
+        user_id="user-id",
+        file_tool=file_tool,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(svc=svc)))
+    records = [
+        {
+            "source_video_id": "video-1",
+            "b2_path": "videos/video-1.mp4",
+            "thumbnail_b2_path": "thumbnails/video-1.webp",
+        }
+    ]
+    get_records = AsyncMock(side_effect=[records, []])
+    move_records = AsyncMock(return_value=1)
+    monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(
+        main,
+        "_require_workspace_manager",
+        AsyncMock(return_value={"role": "owner"}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workspace_membership",
+        AsyncMock(return_value={"role": "member"}),
+    )
+    monkeypatch.setattr(main.media_library, "get_media_storage_records", get_records)
+    monkeypatch.setattr(main.media_library, "move_media_records", move_records)
+
+    result = await main.bulk_move_media(
+        main.BulkMediaMoveRequest(
+            source_video_ids=["video-1"],
+            destination_client_id=DESTINATION_CLIENT_ID,
+        ),
+        request,  # type: ignore[arg-type]
+    )
+
+    assert result["moved"] == 1
+    assert result["destination_client_id"] == DESTINATION_CLIENT_ID
+    assert file_tool.copy_path_to_storage.await_count == 2
+    move_records.assert_awaited_once()
+    file_tool.delete_paths_from_storage.assert_awaited_once_with(
+        ["videos/video-1.mp4", "thumbnails/video-1.webp"]
+    )

@@ -164,6 +164,15 @@ class B2LinkRequest(BaseModel):
     media_url: str = Field(min_length=1, max_length=4096)
 
 
+class BulkMediaDeleteRequest(BaseModel):
+    source_video_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class BulkMediaMoveRequest(BaseModel):
+    source_video_ids: list[str] = Field(min_length=1, max_length=100)
+    destination_client_id: uuid.UUID
+
+
 # ── Exception handlers ─────────────────────────────────────────────────────────
 
 
@@ -1122,6 +1131,202 @@ async def register_media_storage(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _clean_source_video_ids(source_video_ids: list[str]) -> list[str]:
+    cleaned = list(dict.fromkeys(source_id.strip() for source_id in source_video_ids))
+    if any(not source_id for source_id in cleaned):
+        raise HTTPException(status_code=422, detail="source_video_ids must not contain blanks")
+    return cleaned
+
+
+def _media_storage_paths(records: list[dict[str, Any]]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(path)
+            for row in records
+            for field in ("b2_path", "thumbnail_b2_path")
+            if (path := row.get(field))
+        )
+    )
+
+
+@app.post("/media/bulk-delete")
+async def bulk_delete_media(
+    body: BulkMediaDeleteRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Delete selected media and indexed knowledge from one managed workspace."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+    await _require_workspace_manager(
+        svc,
+        user_id=runtime.user_id,
+        client_id=runtime.client_id,
+    )
+
+    source_ids = _clean_source_video_ids(body.source_video_ids)
+    records = await media_library.get_media_storage_records(
+        svc,
+        client_id=runtime.client_id,
+        source_video_ids=source_ids,
+    )
+    found_ids = {str(row.get("source_video_id") or "") for row in records}
+    missing = [source_id for source_id in source_ids if source_id not in found_ids]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Selected videos were not found: {', '.join(missing)}",
+        )
+
+    storage_paths = _media_storage_paths(records)
+    if storage_paths:
+        try:
+            await runtime.file_tool.delete_paths_from_storage(storage_paths)
+        except Exception as exc:
+            logger.exception(
+                "bulk_media_storage_cleanup_failed",
+                client_id=str(runtime.client_id),
+                source_video_ids=source_ids,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Could not delete the selected videos from storage. Please retry.",
+            ) from exc
+
+    deleted = await media_library.delete_media_records(
+        svc,
+        client_id=runtime.client_id,
+        source_video_ids=source_ids,
+    )
+
+    return {"deleted": deleted, "source_video_ids": source_ids, "warnings": []}
+
+
+@app.post("/media/bulk-move")
+async def bulk_move_media(
+    body: BulkMediaMoveRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Move selected knowledge and B2 objects into another member workspace."""
+    svc: AsyncClient = request.app.state.svc
+    runtime = await resolve_runtime(request, svc)
+    await _require_workspace_manager(
+        svc,
+        user_id=runtime.user_id,
+        client_id=runtime.client_id,
+    )
+    destination_client_id = body.destination_client_id
+    if destination_client_id == runtime.client_id:
+        raise HTTPException(status_code=409, detail="Choose a different destination workspace")
+    destination_membership = await _workspace_membership(
+        svc,
+        user_id=runtime.user_id,
+        client_id=destination_client_id,
+    )
+    if destination_membership is None:
+        raise HTTPException(status_code=403, detail="You are not a member of that workspace")
+
+    destination_response = (
+        await svc.table("clients_registry")
+        .select("client_id,b2_bucket,b2_prefix,status")
+        .eq("client_id", str(destination_client_id))
+        .eq("status", "active")
+        .maybe_single()
+        .execute()
+    )
+    destination = as_dict(destination_response.data if destination_response else None)
+    destination_bucket = str((destination or {}).get("b2_bucket") or "").strip()
+    destination_prefix = str((destination or {}).get("b2_prefix") or "").strip("/")
+    if not destination_bucket:
+        raise HTTPException(status_code=409, detail="Destination workspace B2 storage is not ready")
+
+    source_ids = _clean_source_video_ids(body.source_video_ids)
+    records = await media_library.get_media_storage_records(
+        svc,
+        client_id=runtime.client_id,
+        source_video_ids=source_ids,
+    )
+    found_ids = {str(row.get("source_video_id") or "") for row in records}
+    missing = [source_id for source_id in source_ids if source_id not in found_ids]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Selected videos were not found: {', '.join(missing)}",
+        )
+    destination_collisions = await media_library.get_media_storage_records(
+        svc,
+        client_id=destination_client_id,
+        source_video_ids=source_ids,
+    )
+    if destination_collisions:
+        names = ", ".join(str(row.get("source_video_id") or "") for row in destination_collisions)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Destination already contains: {names}",
+        )
+
+    storage_paths = _media_storage_paths(records)
+    copied_paths: list[str] = []
+    try:
+        for path in storage_paths:
+            copied = await runtime.file_tool.copy_path_to_storage(
+                path,
+                destination_bucket=destination_bucket,
+                destination_prefix=destination_prefix,
+            )
+            if copied:
+                copied_paths.append(path)
+    except Exception as exc:
+        if copied_paths:
+            try:
+                await runtime.file_tool.delete_paths_from_storage(
+                    copied_paths,
+                    bucket_name=destination_bucket,
+                    prefix=destination_prefix,
+                )
+            except Exception:
+                logger.exception("bulk_media_copy_rollback_failed")
+        raise HTTPException(status_code=502, detail=f"Could not copy B2 media: {exc}") from exc
+
+    try:
+        moved = await media_library.move_media_records(
+            svc,
+            source_client_id=runtime.client_id,
+            destination_client_id=destination_client_id,
+            source_video_ids=source_ids,
+            destination_b2_bucket=destination_bucket,
+        )
+    except Exception:
+        if copied_paths:
+            try:
+                await runtime.file_tool.delete_paths_from_storage(
+                    copied_paths,
+                    bucket_name=destination_bucket,
+                    prefix=destination_prefix,
+                )
+            except Exception:
+                logger.exception("bulk_media_database_rollback_cleanup_failed")
+        raise
+
+    warnings: list[str] = []
+    if copied_paths:
+        try:
+            await runtime.file_tool.delete_paths_from_storage(storage_paths)
+        except Exception as exc:
+            logger.exception(
+                "bulk_media_source_cleanup_failed",
+                client_id=str(runtime.client_id),
+                source_video_ids=source_ids,
+            )
+            warnings.append(f"Move completed, but source B2 cleanup failed: {exc}")
+
+    return {
+        "moved": moved,
+        "source_video_ids": source_ids,
+        "destination_client_id": str(destination_client_id),
+        "warnings": warnings,
+    }
 
 
 @app.get("/media/{source_video_id}")
