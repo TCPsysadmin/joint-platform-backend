@@ -39,12 +39,10 @@ class Settings(BaseSettings):
     storage_provisioning_webhook_secret: str = ""
     google_drive_provisioning_parent_id: str = "1RJQXpLXOE3cXclgpZfvSPt0U648pYuIb"
 
-    # Render-side Google Drive access used to trash transcript/summary exports.
-    # Store the complete service-account key JSON as a secret environment value.
-    google_drive_service_account_json: str = ""
-    # Optional Workspace user for domain-wide delegation. Leave blank when the
-    # service account is a member of the Shared Drive itself.
-    google_drive_delegated_user: str = ""
+    # Private n8n webhook that moves ingestion transcript/summary exports to
+    # Google Drive Trash during media deletion.
+    media_deletion_webhook_url: str = ""
+    media_deletion_webhook_secret: str = ""
 
     opusclip_api_key: str = ""
     opusclip_api_url: str = "https://api.opus.pro/api"

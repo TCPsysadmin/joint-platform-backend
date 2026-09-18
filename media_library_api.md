@@ -116,14 +116,7 @@ thumbnails from the workspace's B2 storage, then atomically deletes their
 ingestion manifests, transcript segments, and summary rows.
 
 If Drive or B2 cleanup fails, the endpoint returns `502` and leaves the database
-records in place so the deletion can be retried. Drive cleanup is performed
-directly by this backend through Google Drive API v3; n8n is not involved.
-Configure `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` in Render with the complete
-service-account key JSON, and grant that account access to the Shared Drive.
-If the Workspace uses domain-wide delegation instead, also set
-`GOOGLE_DRIVE_DELEGATED_USER` to the delegated Workspace user email.
-
-A successful response is:
+records in place so the deletion can be retried. A successful response is:
 
 ```json
 {
