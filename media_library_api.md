@@ -110,12 +110,12 @@ Workspace owners and admins can permanently delete up to 100 videos at once:
 }
 ```
 
-The operation is tenant-scoped. It first removes the source videos and private
+The operation is tenant-scoped. It first moves the corresponding transcript and
+summary exports to Google Drive Trash, removes the source videos and private
 thumbnails from the workspace's B2 storage, then atomically deletes their
-ingestion manifests, transcript segments, and summary rows. Completed Google
-Drive transcript and summary exports are retained as recovery copies.
+ingestion manifests, transcript segments, and summary rows.
 
-If storage cleanup fails, the endpoint returns `502` and leaves the database
+If Drive or B2 cleanup fails, the endpoint returns `502` and leaves the database
 records in place so the deletion can be retried. A successful response is:
 
 ```json

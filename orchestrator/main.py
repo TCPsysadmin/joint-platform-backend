@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from supabase import AsyncClient, create_async_client
 
-from orchestrator import media_library, session_documents, session_manager
+from orchestrator import drive_cleanup, media_library, session_documents, session_manager
 from orchestrator.auth import (
     admin_create_auth_user,
     extract_bearer,
@@ -1151,6 +1151,17 @@ def _media_storage_paths(records: list[dict[str, Any]]) -> list[str]:
     )
 
 
+def _media_drive_file_ids(records: list[dict[str, Any]]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(file_id)
+            for row in records
+            for field in ("transcript_drive_file_id", "summary_drive_file_id")
+            if (file_id := row.get(field))
+        )
+    )
+
+
 @app.post("/media/bulk-delete")
 async def bulk_delete_media(
     body: BulkMediaDeleteRequest,
@@ -1179,6 +1190,24 @@ async def bulk_delete_media(
             detail=f"Selected videos were not found: {', '.join(missing)}",
         )
 
+    drive_file_ids = _media_drive_file_ids(records)
+    if drive_file_ids:
+        try:
+            await drive_cleanup.trash_drive_files(drive_file_ids)
+        except drive_cleanup.DriveCleanupError as exc:
+            logger.exception(
+                "bulk_media_drive_cleanup_failed",
+                client_id=str(runtime.client_id),
+                source_video_ids=source_ids,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Could not remove the selected transcript and summary files "
+                    "from Google Drive. Please retry."
+                ),
+            ) from exc
+
     storage_paths = _media_storage_paths(records)
     if storage_paths:
         try:
@@ -1199,7 +1228,6 @@ async def bulk_delete_media(
         client_id=runtime.client_id,
         source_video_ids=source_ids,
     )
-
     return {"deleted": deleted, "source_video_ids": source_ids, "warnings": []}
 
 

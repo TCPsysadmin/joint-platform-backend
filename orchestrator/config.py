@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     storage_provisioning_webhook_secret: str = ""
     google_drive_provisioning_parent_id: str = "1RJQXpLXOE3cXclgpZfvSPt0U648pYuIb"
 
-    # Server-to-server transcription access. Browser clients must never receive
-    # B2 credentials, so B2-link ingestion is proxied through this service.
-    transcription_api_url: str = ""
-    transcription_api_key: str = ""
+    # Private n8n webhook that moves ingestion transcript/summary exports to
+    # Google Drive Trash during media deletion.
+    media_deletion_webhook_url: str = ""
+    media_deletion_webhook_secret: str = ""
 
     opusclip_api_key: str = ""
     opusclip_api_url: str = "https://api.opus.pro/api"

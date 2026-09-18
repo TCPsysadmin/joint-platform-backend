@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from collections import Counter
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from postgrest import CountMethod
@@ -259,7 +259,23 @@ async def get_media_storage_records(
         .execute()
     )
     rows = as_dict_list(response.data if response is not None else None)
-    by_id = {str(row.get("source_video_id") or ""): row for row in rows}
+    manifest_response = (
+        await svc.table("ingestion_manifests")
+        .select("source_video_id,transcript_drive_file_id,summary_drive_file_id")
+        .eq("client_id", str(client_id))
+        .in_("source_video_id", source_video_ids)
+        .execute()
+    )
+    manifests = as_dict_list(
+        manifest_response.data if manifest_response is not None else None
+    )
+    manifest_by_id = {
+        str(row.get("source_video_id") or ""): row for row in manifests
+    }
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        source_id = str(row.get("source_video_id") or "")
+        by_id[source_id] = {**row, **manifest_by_id.get(source_id, {})}
     return [by_id[source_id] for source_id in source_video_ids if source_id in by_id]
 
 
@@ -277,7 +293,7 @@ async def delete_media_records(
             "p_source_video_ids": source_video_ids,
         },
     ).execute()
-    return int(response.data or 0) if response is not None else 0
+    return int(cast(Any, response.data) or 0) if response is not None else 0
 
 
 async def move_media_records(
@@ -298,7 +314,7 @@ async def move_media_records(
             "p_destination_b2_bucket": destination_b2_bucket,
         },
     ).execute()
-    return int(response.data or 0) if response is not None else 0
+    return int(cast(Any, response.data) or 0) if response is not None else 0
 
 
 def _object_path(value: str, *, field: str) -> str:

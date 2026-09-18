@@ -33,6 +33,10 @@ services:
         sync: false
       - key: GOOGLE_DRIVE_PROVISIONING_PARENT_ID
         value: "1RJQXpLXOE3cXclgpZfvSPt0U648pYuIb"
+      - key: MEDIA_DELETION_WEBHOOK_URL
+        sync: false
+      - key: MEDIA_DELETION_WEBHOOK_SECRET
+        sync: false
       - key: LANGCHAIN_TRACING_V2
         value: "false"
       - key: LANGCHAIN_API_KEY

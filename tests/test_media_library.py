@@ -282,15 +282,19 @@ async def test_bulk_delete_media_requires_manager_and_cleans_storage(
             "source_video_id": "video-1",
             "b2_path": "videos/video-1.mp4",
             "thumbnail_b2_path": "thumbnails/video-1.webp",
+            "transcript_drive_file_id": "drive-transcript-1",
+            "summary_drive_file_id": "drive-summary-1",
         }
     ]
     get_records = AsyncMock(return_value=records)
     delete_records = AsyncMock(return_value=1)
+    trash_drive_files = AsyncMock(return_value=2)
     require_manager = AsyncMock(return_value={"role": "admin"})
     monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
     monkeypatch.setattr(main, "_require_workspace_manager", require_manager)
     monkeypatch.setattr(main.media_library, "get_media_storage_records", get_records)
     monkeypatch.setattr(main.media_library, "delete_media_records", delete_records)
+    monkeypatch.setattr(main.drive_cleanup, "trash_drive_files", trash_drive_files)
 
     result = await main.bulk_delete_media(
         main.BulkMediaDeleteRequest(source_video_ids=["video-1"]),
@@ -307,6 +311,55 @@ async def test_bulk_delete_media_requires_manager_and_cleans_storage(
     file_tool.delete_paths_from_storage.assert_awaited_once_with(
         ["videos/video-1.mp4", "thumbnails/video-1.webp"]
     )
+    trash_drive_files.assert_awaited_once_with(
+        ["drive-transcript-1", "drive-summary-1"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_media_keeps_everything_when_drive_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc = object()
+    file_tool = SimpleNamespace(delete_paths_from_storage=AsyncMock(return_value=[]))
+    runtime = SimpleNamespace(
+        client_id=FAKE_CLIENT_ID,
+        user_id="user-id",
+        file_tool=file_tool,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(svc=svc)))
+    records = [
+        {
+            "source_video_id": "video-1",
+            "b2_path": "videos/video-1.mp4",
+            "transcript_drive_file_id": "drive-transcript-1",
+            "summary_drive_file_id": "drive-summary-1",
+        }
+    ]
+    delete_records = AsyncMock(return_value=1)
+    monkeypatch.setattr(main, "resolve_runtime", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(main, "_require_workspace_manager", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        main.media_library,
+        "get_media_storage_records",
+        AsyncMock(return_value=records),
+    )
+    monkeypatch.setattr(main.media_library, "delete_media_records", delete_records)
+    monkeypatch.setattr(
+        main.drive_cleanup,
+        "trash_drive_files",
+        AsyncMock(side_effect=main.drive_cleanup.DriveCleanupError("n8n unavailable")),
+    )
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.bulk_delete_media(
+            main.BulkMediaDeleteRequest(source_video_ids=["video-1"]),
+            request,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 502
+    file_tool.delete_paths_from_storage.assert_not_awaited()
+    delete_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
