@@ -311,9 +311,7 @@ async def test_bulk_delete_media_requires_manager_and_cleans_storage(
     file_tool.delete_paths_from_storage.assert_awaited_once_with(
         ["videos/video-1.mp4", "thumbnails/video-1.webp"]
     )
-    trash_drive_files.assert_awaited_once_with(
-        ["drive-transcript-1", "drive-summary-1"]
-    )
+    trash_drive_files.assert_awaited_once_with(["drive-transcript-1", "drive-summary-1"])
 
 
 @pytest.mark.asyncio

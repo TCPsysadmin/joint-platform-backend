@@ -32,9 +32,7 @@ async def trash_drive_files(file_ids: list[str]) -> int:
         raise DriveCleanupError("Could not reach the Drive cleanup workflow") from exc
 
     if response.status_code != 200:
-        raise DriveCleanupError(
-            f"Drive cleanup workflow returned status {response.status_code}"
-        )
+        raise DriveCleanupError(f"Drive cleanup workflow returned status {response.status_code}")
 
     try:
         payload = response.json()

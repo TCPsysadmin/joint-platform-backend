@@ -29,9 +29,7 @@ async def test_trash_drive_files_calls_private_webhook_once(
     )
     monkeypatch.setattr(drive_cleanup.settings, "media_deletion_webhook_secret", "secret")
 
-    deleted = await drive_cleanup.trash_drive_files(
-        ["transcript-1", "summary-1", "transcript-1"]
-    )
+    deleted = await drive_cleanup.trash_drive_files(["transcript-1", "summary-1", "transcript-1"])
 
     assert deleted == 2
     assert len(requests) == 1

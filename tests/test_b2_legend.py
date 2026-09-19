@@ -342,9 +342,7 @@ async def test_delete_paths_removes_every_version_inside_the_workspace_prefix(
                     "fileId": "old-video-version",
                 },
             ],
-            thumbnail_path: [
-                _file_row(thumbnail_path, ts=2_000, content_type="image/webp")
-            ],
+            thumbnail_path: [_file_row(thumbnail_path, ts=2_000, content_type="image/webp")],
         }
     )
     _install(monkeypatch, fake)

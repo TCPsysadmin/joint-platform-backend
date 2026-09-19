@@ -266,12 +266,8 @@ async def get_media_storage_records(
         .in_("source_video_id", source_video_ids)
         .execute()
     )
-    manifests = as_dict_list(
-        manifest_response.data if manifest_response is not None else None
-    )
-    manifest_by_id = {
-        str(row.get("source_video_id") or ""): row for row in manifests
-    }
+    manifests = as_dict_list(manifest_response.data if manifest_response is not None else None)
+    manifest_by_id = {str(row.get("source_video_id") or ""): row for row in manifests}
     by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
         source_id = str(row.get("source_video_id") or "")
