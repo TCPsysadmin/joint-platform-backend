@@ -8,12 +8,15 @@ is handed off to the existing local-file transcription job path.
 State is held in memory (mirroring JobManager). Sessions do not survive a process
 restart — orphaned `.part` files are cleared on boot by main.py's lifespan.
 """
+import logging
 import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class UploadError(Exception):
@@ -110,7 +113,16 @@ class UploadManager:
         session = self._require(upload_id)
 
         total = session.get("total_size")
-        if total is not None and session["received_bytes"] != total:
+        if total is None:
+            # Without a declared size a truncated upload cannot be detected here and
+            # would silently produce a transcript missing its tail.
+            logger.warning(
+                "Upload %s completed without total_size; cannot verify completeness "
+                "(received %d bytes)",
+                upload_id,
+                session["received_bytes"],
+            )
+        elif session["received_bytes"] != total:
             raise UploadError(
                 f"incomplete_upload: received {session['received_bytes']} of {total} bytes"
             )
