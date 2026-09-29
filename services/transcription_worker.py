@@ -43,6 +43,9 @@ B2_ARCHIVE_BUCKET = os.getenv("B2_ARCHIVE_BUCKET", "").strip()
 B2_VIDEO_PREFIX = os.getenv("B2_VIDEO_PREFIX", "videos").strip().strip("/")
 B2_THUMBNAIL_PREFIX = os.getenv("B2_THUMBNAIL_PREFIX", "thumbnails").strip().strip("/")
 THUMBNAIL_AT_SECONDS = float(os.getenv("THUMBNAIL_AT_SECONDS", "3"))
+# Streaming path: ffmpeg's list of completed segments (lives inside the job's segment dir)
+SEGMENT_LIST_NAME = "segments.list"
+SEGMENT_NAME_RE = re.compile(r"chunk_(\d{3,})\.mp3")
 
 
 class TranscriptionWorker:
@@ -536,9 +539,11 @@ class TranscriptionWorker:
                 )
                 
                 # ffmpeg reads from pipe, writes chunk_000.mp3, chunk_001.mp3, ... to segment_dir
+                # and appends each finished segment's name to segment_list_path
+                segment_list_path = os.path.join(segment_dir, SEGMENT_LIST_NAME)
                 logger.info(f"Job {job_id}: Starting ffmpeg stream-to-segments...")
                 proc = await self.media_processor.run_ffmpeg_stream_to_segments(
-                    r, segment_dir, CHUNK_DURATION_SECONDS
+                    r, segment_dir, CHUNK_DURATION_SECONDS, segment_list_path
                 )
                 r = -1  # ffmpeg process holds it
                 logger.info(f"Job {job_id}: ffmpeg started (PID: {proc.pid})")
@@ -578,19 +583,14 @@ class TranscriptionWorker:
                                     proc.kill()
                             raise Exception(f"B2 download failed: {e}")
                     
-                    # List current segment files
-                    indices = set()
-                    try:
-                        for name in os.listdir(segment_dir):
-                            if name.startswith("chunk_") and name.endswith(".mp3"):
-                                try:
-                                    idx = int(name[6:9])  # chunk_XXX.mp3
-                                    indices.add(idx)
-                                except ValueError:
-                                    pass
-                    except Exception as e:
-                        logger.warning(f"Job {job_id}: Error listing segment dir: {e}")
-                    
+                    # Snapshot ffmpeg's state BEFORE reading the segment list. If it had
+                    # already exited, the list read below is final and the loop can stop
+                    # once it is drained. Deciding to stop from a listing taken before the
+                    # exit would miss a final segment written while a chunk was transcribing.
+                    ffmpeg_exited = proc.returncode is not None
+                    completed = self._read_segment_list(segment_list_path)
+                    indices = completed | self._list_segment_files(job_id, segment_dir)
+
                     if indices:
                         last_segment_time = asyncio.get_event_loop().time()
                         initial_wait = False
@@ -616,31 +616,27 @@ class TranscriptionWorker:
                                 proc.kill()
                         raise Exception(f"No segments produced after {no_segments_timeout}s. ffmpeg may have failed.")
                     
-                    for i in sorted(indices):
-                        if i in processed:
-                            continue
-                        # Chunk i is complete when chunk i+1 exists or ffmpeg has exited
-                        if (i + 1) in indices or proc.returncode is not None:
-                            path = os.path.join(segment_dir, f"chunk_{i:03d}.mp3")
-                            if os.path.exists(path):
-                                logger.info(f"Job {job_id}: Processing chunk {i}")
-                                try:
-                                    transcript = await self._transcribe_chunk_with_retry(
-                                        job_id, path, i, max(indices) + 1 if indices else 1
-                                    )
-                                    results[i] = transcript
-                                    self.job_manager.update_progress(
-                                        job_id, len(results), max(indices) + 1 if indices else 1
-                                    )
-                                    logger.info(f"Job {job_id}: Chunk {i} transcribed successfully")
-                                finally:
-                                    self._cleanup_files([path])
-                                processed.add(i)
-                    
-                    if proc.returncode is not None:
+                    # Only segments ffmpeg has listed as finished are transcribed
+                    total_estimate = max(indices) + 1 if indices else 1
+                    for i in sorted(completed - processed):
+                        path = os.path.join(segment_dir, f"chunk_{i:03d}.mp3")
+                        if not os.path.exists(path):
+                            raise Exception(f"segment_missing: chunk {i} listed by ffmpeg but not on disk")
+                        logger.info(f"Job {job_id}: Processing chunk {i}")
+                        try:
+                            transcript = await self._transcribe_chunk_with_retry(
+                                job_id, path, i, total_estimate
+                            )
+                            results[i] = transcript
+                            self.job_manager.update_progress(job_id, len(results), total_estimate)
+                            logger.info(f"Job {job_id}: Chunk {i} transcribed successfully")
+                        finally:
+                            self._cleanup_files([path])
+                        processed.add(i)
+
+                    if ffmpeg_exited:
                         logger.info(f"Job {job_id}: ffmpeg exited with code {proc.returncode}")
-                        if not indices or len(processed) >= len(indices):
-                            break
+                        break
                     await asyncio.sleep(poll_interval)
                 
                 # If ffmpeg failed, do NOT wait for B2 (B2 may block forever writing to a pipe no one reads)
@@ -675,11 +671,21 @@ class TranscriptionWorker:
                         pass
                     logger.warning(f"Job {job_id}: B2 task did not finish in time (ignored, ffmpeg already done)")
                 await proc.wait()
-                
+
+                # Every segment ffmpeg produced must have been transcribed, with no gaps.
+                # Transcribed files are deleted, so any chunk file left on disk was missed.
+                listed = self._read_segment_list(segment_list_path)
+                leftover = self._list_segment_files(job_id, segment_dir)
+                if listed != set(range(len(listed))) or processed != listed or leftover:
+                    raise Exception(
+                        f"segments_incomplete: ffmpeg listed {sorted(listed)}, "
+                        f"transcribed {sorted(processed)}, untranscribed files {sorted(leftover)}"
+                    )
+
                 # Return transcripts in order
-                num_chunks = max(results.keys()) + 1 if results else 0
+                num_chunks = len(listed)
                 self.job_manager.update_job(job_id, chunks_total=num_chunks)
-                return [results.get(i, "") for i in range(num_chunks)]
+                return [results[i] for i in range(num_chunks)]
                 
             finally:
                 # Cleanup: close pipe ends if not already closed
@@ -722,6 +728,36 @@ class TranscriptionWorker:
             except Exception as ex:
                 logger.warning(f"Cleanup segment dir: {ex}")
     
+    @staticmethod
+    def _read_segment_list(segment_list_path: str) -> set[int]:
+        """Indices of segments ffmpeg has finished, from its -segment_list file.
+        A partially written last line does not match the name pattern and is ignored.
+        """
+        try:
+            with open(segment_list_path, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except FileNotFoundError:
+            return set()
+        indices = set()
+        for line in lines:
+            match = SEGMENT_NAME_RE.fullmatch(os.path.basename(line.strip()))
+            if match:
+                indices.add(int(match.group(1)))
+        return indices
+
+    @staticmethod
+    def _list_segment_files(job_id: str, segment_dir: str) -> set[int]:
+        """Indices of chunk_XXX.mp3 files currently on disk (complete or still being written)."""
+        indices = set()
+        try:
+            for name in os.listdir(segment_dir):
+                match = SEGMENT_NAME_RE.fullmatch(name)
+                if match:
+                    indices.add(int(match.group(1)))
+        except Exception as e:
+            logger.warning(f"Job {job_id}: Error listing segment dir: {e}")
+        return indices
+
     async def _incremental_chunk_transcription(self, job_id: str, job: dict, b2_client: B2Client) -> list[str]:
         """Fallback: Download file, extract audio, then create chunks incrementally.
         Still better than creating all chunks at once, but writes full file to disk first.

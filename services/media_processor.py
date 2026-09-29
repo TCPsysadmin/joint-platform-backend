@@ -396,23 +396,30 @@ class MediaProcessor:
     
     @staticmethod
     async def run_ffmpeg_stream_to_segments(
-        pipe_read_fd: int, output_dir: str, segment_time_seconds: int
+        pipe_read_fd: int, output_dir: str, segment_time_seconds: int, segment_list_path: str
     ) -> "asyncio.subprocess.Process":
         """Run ffmpeg reading from pipe (stdin), extract audio and write segment files.
         Does not load the full input into disk; peak disk = ~2 segment files.
         Caller must close pipe_read_fd after the process is created (ffmpeg holds it).
         Returns the Process; segment files appear in output_dir as chunk_000.mp3, chunk_001.mp3, ...
+        ffmpeg appends each segment's file name to segment_list_path only once that segment
+        is complete, so the list is the authoritative record of finished segments.
         """
         os.makedirs(output_dir, exist_ok=True)
         segment_pattern = os.path.join(output_dir, "chunk_%03d.mp3")
         cmd = [
             "ffmpeg", "-y",
+            # Keep stderr small: it is a PIPE that nobody drains while ffmpeg runs, and
+            # progress output on a long file would fill it and block ffmpeg.
+            "-hide_banner", "-nostats", "-loglevel", "error",
             "-i", "pipe:0",
             "-vn",
             "-acodec", "libmp3lame", "-q:a", "2",
             "-f", "segment",
             "-segment_time", str(segment_time_seconds),
             "-segment_format", "mp3",
+            "-segment_list", segment_list_path,
+            "-segment_list_type", "flat",
             "-reset_timestamps", "1",
             segment_pattern,
         ]
