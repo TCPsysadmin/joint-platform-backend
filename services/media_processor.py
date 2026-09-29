@@ -7,12 +7,30 @@ low-memory environments (e.g. 512MB); ensure ffmpeg is installed on the system.
 """
 import asyncio
 import logging
+import math
 import os
 import subprocess
 from pathlib import Path
 from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
+
+# A final remainder shorter than this is folded into the previous chunk instead of
+# becoming its own chunk: mp3 padding makes an exact multiple probe a few ms long,
+# and the transcription API rejects clips under 0.1s.
+MIN_FINAL_CHUNK_SECONDS = 0.5
+
+
+def plan_chunk_count(duration_seconds: float, chunk_duration: float) -> int:
+    """Number of chunks needed to cover the whole file: ceil(duration / chunk_duration),
+    minus a trailing sliver under MIN_FINAL_CHUNK_SECONDS (the last chunk absorbs it).
+    """
+    if duration_seconds <= chunk_duration:
+        return 1
+    num_chunks = math.ceil(duration_seconds / chunk_duration)
+    if duration_seconds - (num_chunks - 1) * chunk_duration < MIN_FINAL_CHUNK_SECONDS:
+        num_chunks -= 1
+    return max(1, num_chunks)
 
 
 class NoAudioTrackError(RuntimeError):
@@ -202,7 +220,7 @@ class MediaProcessor:
         """Chunk audio using ffmpeg (fast, memory-efficient)"""
         chunks = []
         chunk_duration_seconds = chunk_duration
-        num_chunks = int(duration_seconds / chunk_duration_seconds) + 1
+        num_chunks = plan_chunk_count(duration_seconds, chunk_duration_seconds)
         
         logger.info(f"Splitting {duration_seconds}s audio into ~{num_chunks} chunks using ffmpeg")
         
@@ -210,12 +228,14 @@ class MediaProcessor:
             start_time = i * chunk_duration_seconds
             chunk_path = f"{audio_path}_chunk_{i}.mp3"
             
-            # Use ffmpeg to extract chunk without loading full file
+            # Use ffmpeg to extract chunk without loading full file.
+            # The last chunk has no -t so it runs to the true end of the audio.
+            duration_args = [] if i == num_chunks - 1 else ['-t', str(chunk_duration_seconds)]
             cmd = [
                 'ffmpeg',
                 '-i', audio_path,
                 '-ss', str(start_time),  # Start time
-                '-t', str(chunk_duration_seconds),  # Duration
+                *duration_args,  # Duration
                 '-acodec', 'copy',  # Copy codec (fast, no re-encoding)
                 '-y',  # Overwrite
                 chunk_path
@@ -301,10 +321,7 @@ class MediaProcessor:
         def _get_info():
             try:
                 duration_seconds = self._get_audio_duration(audio_path)
-                if duration_seconds <= chunk_duration:
-                    return (duration_seconds, 1)
-                num_chunks = int(duration_seconds / chunk_duration) + 1
-                return (duration_seconds, num_chunks)
+                return (duration_seconds, plan_chunk_count(duration_seconds, chunk_duration))
             except Exception as e:
                 logger.error(f"Failed to get chunk info: {e}")
                 raise Exception(f"Cannot get chunk info: {e}")
@@ -312,23 +329,38 @@ class MediaProcessor:
         return await asyncio.get_event_loop().run_in_executor(None, _get_info)
     
     async def create_single_chunk(
-        self, audio_path: str, chunk_index: int, chunk_duration: int, output_dir: str
+        self,
+        audio_path: str,
+        chunk_index: int,
+        chunk_duration: int,
+        output_dir: str,
+        duration_seconds: float | None = None,
     ) -> str | None:
-        """Create a single chunk file on-demand. Returns path to chunk file, or None if past end of audio.
+        """Create a single chunk file on-demand. Returns path to chunk file, or None if the
+        chunk starts at or past the known end of the audio (duration_seconds). Any other
+        ffmpeg failure raises, so a chunk is never silently dropped from the transcript.
         This allows incremental processing: create chunk, transcribe, delete, repeat.
         """
+        # Calculate start time for this chunk
+        start_time = chunk_index * chunk_duration
+        past_end = duration_seconds is not None and start_time >= duration_seconds
+        # The last planned chunk has no -t so it also covers any sub-second remainder
+        is_last = (
+            duration_seconds is not None
+            and chunk_index >= plan_chunk_count(duration_seconds, chunk_duration) - 1
+        )
+
         def _create_chunk():
             try:
-                # Calculate start time for this chunk
-                start_time = chunk_index * chunk_duration
                 chunk_path = os.path.join(output_dir, f"chunk_{chunk_index}.mp3")
+                duration_args = [] if is_last else ['-t', str(chunk_duration)]
                 
                 # Use ffmpeg to extract single chunk without loading full file
                 cmd = [
                     'ffmpeg',
                     '-i', audio_path,
                     '-ss', str(start_time),  # Start time
-                    '-t', str(chunk_duration),  # Duration
+                    *duration_args,  # Duration
                     '-acodec', 'copy',  # Copy codec (fast, no re-encoding)
                     '-y',  # Overwrite
                     chunk_path
@@ -345,17 +377,17 @@ class MediaProcessor:
                         logger.warning(f"Chunk {chunk_index} exceeds {self.MAX_CHUNK_SIZE_MB}MB: {chunk_size_mb:.2f}MB")
                     
                     return chunk_path
-                else:
-                    logger.warning(f"Chunk {chunk_index} was not created, may be past end of audio")
+                if past_end:
+                    logger.warning(f"Chunk {chunk_index} was not created, starts past end of audio")
                     return None
+                raise Exception("ffmpeg produced no output")
                     
             except subprocess.CalledProcessError as e:
-                # If ffmpeg fails, chunk may be past end of audio
-                if "Invalid data found" in e.stderr or "End of file" in e.stderr:
+                if past_end:
                     logger.debug(f"Chunk {chunk_index} past end of audio")
                     return None
                 logger.error(f"ffmpeg error creating chunk {chunk_index}: {e.stderr}")
-                raise Exception(f"Failed to create chunk {chunk_index}: {e.stderr}")
+                raise Exception(f"Failed to create chunk {chunk_index}: {(e.stderr or '')[-1000:]}")
             except Exception as e:
                 logger.error(f"Unexpected error creating chunk {chunk_index}: {e}")
                 raise Exception(f"Failed to create chunk {chunk_index}: {e}")

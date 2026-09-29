@@ -883,7 +883,7 @@ class TranscriptionWorker:
             for i in range(batch_size):
                 chunk_index = batch_start + i
                 task = self._create_and_transcribe_chunk(
-                    job_id, audio_path, chunk_index, num_chunks
+                    job_id, audio_path, chunk_index, num_chunks, duration_seconds
                 )
                 batch_tasks.append((chunk_index, task))
             
@@ -899,7 +899,12 @@ class TranscriptionWorker:
         return results
     
     async def _create_and_transcribe_chunk(
-        self, job_id: str, audio_path: str, chunk_index: int, total_chunks: int
+        self,
+        job_id: str,
+        audio_path: str,
+        chunk_index: int,
+        total_chunks: int,
+        duration_seconds: float | None = None,
     ) -> str:
         """Create a single chunk, transcribe it, then delete it immediately.
         Returns the transcript text.
@@ -916,7 +921,8 @@ class TranscriptionWorker:
                 audio_path,
                 chunk_index,
                 CHUNK_DURATION_SECONDS,
-                chunks_dir
+                chunks_dir,
+                duration_seconds=duration_seconds,
             )
             
             if chunk_path is None:
