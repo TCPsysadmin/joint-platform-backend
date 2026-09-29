@@ -82,9 +82,12 @@ class MediaProcessor:
         """Extract audio from media file"""
         file_ext = Path(media_path).suffix.lower()
         
-        # If already audio, return as-is
+        # Audio is re-encoded too, not returned as-is: a VBR mp3 without a Xing header
+        # makes ffprobe estimate duration from bitrate (often far too short, so the tail
+        # is never chunked), and wav/flac/m4a cannot be cut into .mp3 chunks with
+        # `-acodec copy`. The normalized mp3 has an accurate header for both.
         if file_ext in self.SUPPORTED_AUDIO_FORMATS:
-            return media_path
+            return await self._extract_audio_from_video(media_path, is_video=False)
         
         # If video, extract audio
         if file_ext in self.SUPPORTED_VIDEO_FORMATS:
@@ -92,8 +95,10 @@ class MediaProcessor:
         
         raise Exception(f"unsupported_format: {file_ext}")
     
-    async def _extract_audio_from_video(self, video_path: str) -> str:
-        """Extract audio track from video file using ffmpeg directly for better performance"""
+    async def _extract_audio_from_video(self, video_path: str, is_video: bool = True) -> str:
+        """Extract the first audio track to mp3 using ffmpeg directly for better performance.
+        Audio input (is_video=False) goes through the same step to normalize it.
+        """
         def _extract():
             audio_path = f"{video_path}_audio.mp3"
 
@@ -115,7 +120,8 @@ class MediaProcessor:
                     capture_output=True,
                     text=True,
                 )
-                if probe.returncode == 0 and not probe.stdout.strip():
+                # Only video may legitimately lack audio; a broken audio file fails below.
+                if is_video and probe.returncode == 0 and not probe.stdout.strip():
                     raise NoAudioTrackError("This video has no audio track.")
             except FileNotFoundError:
                 # The FFmpeg path below retains the existing fallback behavior.
@@ -127,6 +133,7 @@ class MediaProcessor:
                     'ffmpeg',
                     '-i', video_path,
                     '-vn',  # No video
+                    '-map', '0:a:0',  # First audio stream only
                     '-acodec', 'libmp3lame',  # MP3 codec
                     '-q:a', '2',  # High quality
                     '-y',  # Overwrite output
