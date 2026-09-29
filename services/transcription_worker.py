@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from services.media_processor import MediaProcessor, NoAudioTrackError
-from services.openai_client import OpenAITranscriber
+from services.openai_client import OpenAITranscriber, format_segments
 from services.b2_client import B2Client
 from services.webhook_client import WebhookClient
 
@@ -46,6 +46,14 @@ THUMBNAIL_AT_SECONDS = float(os.getenv("THUMBNAIL_AT_SECONDS", "3"))
 # Streaming path: ffmpeg's list of completed segments (lives inside the job's segment dir)
 SEGMENT_LIST_NAME = "segments.list"
 SEGMENT_NAME_RE = re.compile(r"chunk_(\d{3,})\.mp3")
+# whisper-1 sometimes stops transcribing well before the end of a chunk. When the last
+# segment ends more than this many seconds before the chunk does, the remainder is cut
+# out and transcribed once more (tail recovery).
+TAIL_RECOVERY_GAP_SECONDS = float(os.getenv("TAIL_RECOVERY_GAP_SECONDS", "10"))
+# The re-transcribed tail starts this far before the last segment's end for context
+TAIL_RECOVERY_OVERLAP_SECONDS = 2.0
+# The transcription API rejects clips shorter than 0.1s; such slivers hold no speech
+MIN_TRANSCRIBABLE_SECONDS = 0.1
 
 
 class TranscriptionWorker:
@@ -1006,22 +1014,112 @@ class TranscriptionWorker:
     async def _transcribe_chunk_with_retry(
         self, job_id: str, chunk_path: str, chunk_index: int, total_chunks: int
     ) -> str:
-        """Transcribe a single chunk with retry logic"""
+        """Transcribe a single chunk (with retries and tail recovery) and return its
+        timestamped transcript text.
+        """
+        time_offset = chunk_index * CHUNK_DURATION_SECONDS
+        chunk_seconds = await self._probe_chunk_duration(job_id, chunk_path, chunk_index)
+
+        if chunk_seconds is not None and chunk_seconds < MIN_TRANSCRIBABLE_SECONDS:
+            logger.warning(
+                f"Job {job_id}: Chunk {chunk_index} is only {chunk_seconds:.3f}s long; skipping"
+            )
+            transcript = ""
+        else:
+            segments, text = await self._transcribe_file_with_retry(job_id, chunk_path, chunk_index)
+            if chunk_seconds is not None:
+                segments = await self._recover_tail(
+                    job_id, chunk_path, chunk_index, chunk_seconds, segments
+                )
+            transcript = format_segments(segments, time_offset, text)
+
+        # Update progress
+        chunks_completed = chunk_index + 1
+        self.job_manager.update_progress(job_id, chunks_completed, total_chunks)
+
+        logger.info(f"Job {job_id}: Chunk {chunk_index + 1}/{total_chunks} completed")
+        return transcript
+
+    async def _probe_chunk_duration(
+        self, job_id: str, chunk_path: str, chunk_index: int
+    ) -> float | None:
+        """Actual duration of a chunk file, or None if it cannot be determined."""
+        try:
+            return await self.media_processor.get_duration(chunk_path)
+        except Exception as e:
+            # ffprobe cannot parse a file holding only a frame or two of audio
+            if os.path.exists(chunk_path) and os.path.getsize(chunk_path) < 2048:
+                return 0.0
+            logger.warning(
+                f"Job {job_id}: Could not probe duration of chunk {chunk_index} ({e}); "
+                f"tail recovery disabled for this chunk"
+            )
+            return None
+
+    async def _recover_tail(
+        self,
+        job_id: str,
+        chunk_path: str,
+        chunk_index: int,
+        chunk_seconds: float,
+        segments: list[dict],
+    ) -> list[dict]:
+        """If the transcript stops well before the end of the chunk, transcribe the
+        remainder once more and append its segments (timestamps relative to the chunk).
+        """
+        if not segments:
+            logger.info(f"Job {job_id}: Chunk {chunk_index} returned no segments; tail recovery skipped")
+            return segments
+        last_end = max(seg["end"] for seg in segments)
+        gap = chunk_seconds - last_end
+        if gap <= TAIL_RECOVERY_GAP_SECONDS:
+            return segments
+
+        tail_start = max(0.0, last_end - TAIL_RECOVERY_OVERLAP_SECONDS)
+        logger.warning(
+            f"Job {job_id}: Chunk {chunk_index} transcript ends at {last_end:.1f}s of "
+            f"{chunk_seconds:.1f}s ({gap:.1f}s untranscribed); running tail recovery "
+            f"from {tail_start:.1f}s"
+        )
+        # Suffix (not prefix) keeps the file job-prefixed and outside the chunk_XXX.mp3 pattern
+        tail_path = f"{os.path.splitext(chunk_path)[0]}_tail.mp3"
+        try:
+            await self.media_processor.cut_audio_tail(chunk_path, tail_start, tail_path)
+            tail_segments, _ = await self._transcribe_file_with_retry(job_id, tail_path, chunk_index)
+        finally:
+            self._cleanup_files([tail_path])
+
+        recovered = []
+        for seg in tail_segments:
+            start = seg["start"] + tail_start
+            end = seg["end"] + tail_start
+            text = (seg.get("text") or "").strip()
+            # Skip the overlap already covered by the first pass
+            if not text or end <= last_end:
+                continue
+            # Whisper's own silence heuristic: guards against hallucinated text on silence
+            no_speech = seg.get("no_speech_prob")
+            logprob = seg.get("avg_logprob")
+            if no_speech is not None and logprob is not None and no_speech > 0.6 and logprob < -1.0:
+                continue
+            recovered.append({**seg, "start": start, "end": end, "text": text})
+
+        logger.info(
+            f"Job {job_id}: Chunk {chunk_index} tail recovery added {len(recovered)} segment(s)"
+        )
+        return list(segments) + recovered
+
+    async def _transcribe_file_with_retry(
+        self, job_id: str, audio_path: str, chunk_index: int
+    ) -> tuple[list[dict], str]:
+        """One transcription API call with retry logic. Returns (segments, text)."""
         max_retries = 3
         retry_count = 0
-        time_offset = chunk_index * CHUNK_DURATION_SECONDS
 
         while retry_count < max_retries:
             try:
-                transcript = await self.openai_client.transcribe(chunk_path, time_offset=time_offset)
-                
-                # Update progress
-                chunks_completed = chunk_index + 1
-                self.job_manager.update_progress(job_id, chunks_completed, total_chunks)
-                
-                logger.info(f"Job {job_id}: Chunk {chunk_index + 1}/{total_chunks} completed")
-                return transcript
-                
+                return await self.openai_client.transcribe_segments(audio_path)
+
             except Exception as e:
                 retry_count += 1
                 error_type = type(e).__name__

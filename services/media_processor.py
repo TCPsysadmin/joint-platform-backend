@@ -314,6 +314,36 @@ class MediaProcessor:
                 logger.error(f"Failed to get duration with pydub: {pydub_error}")
                 raise Exception(f"Could not determine audio duration. Please install ffmpeg/ffprobe.")
     
+    async def get_duration(self, audio_path: str) -> float:
+        """Async wrapper around _get_audio_duration (ffprobe, pydub fallback)."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._get_audio_duration, audio_path
+        )
+
+    async def cut_audio_tail(self, audio_path: str, start_seconds: float, output_path: str) -> str:
+        """Re-encode audio_path from start_seconds to its end into a standalone mp3.
+        Used to re-transcribe the tail of a chunk the model stopped transcribing early.
+        """
+        def _cut():
+            cmd = [
+                'ffmpeg',
+                '-hide_banner', '-nostats', '-loglevel', 'error',
+                '-ss', f"{start_seconds:.3f}",
+                '-i', audio_path,
+                '-vn',
+                '-map', '0:a:0',
+                '-acodec', 'libmp3lame',
+                '-q:a', '2',
+                '-y',
+                output_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0 or not os.path.exists(output_path):
+                raise Exception(f"tail_cut_failed: {result.stderr[-1000:]}")
+            return output_path
+
+        return await asyncio.get_event_loop().run_in_executor(None, _cut)
+
     async def get_chunk_info(self, audio_path: str, chunk_duration: int = 600) -> tuple[float, int]:
         """Get audio duration and number of chunks without creating any files.
         Returns: (duration_seconds, num_chunks)
