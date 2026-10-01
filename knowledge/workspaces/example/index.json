@@ -1,0 +1,26 @@
+{
+  "src_20260930_brand1": {
+    "media": null,
+    "path": "library/Client docs/brand guide.md",
+    "sha1": "84b78da258c1b289f670f20c24d402a7ca24db34",
+    "summary_of": null,
+    "title": "Brand guide (sample)",
+    "type": "document"
+  },
+  "src_20260930_k1ck0f": {
+    "media": "b2://vpstorage-example/uploads/kickoff.mp4",
+    "path": "library/Onboarding calls/2026-09-30 kickoff_transcript.md",
+    "sha1": "986fd0b74fea2aa63d0dd9e5fe2083905d3c385d",
+    "summary_of": null,
+    "title": "Kickoff call (sample)",
+    "type": "transcript"
+  },
+  "src_20260930_k1cksm": {
+    "media": null,
+    "path": "library/Onboarding calls/2026-09-30 kickoff_summary.md",
+    "sha1": "09247daed31850b7fb8fc13777f0d2ee5a170539",
+    "summary_of": "src_20260930_k1ck0f",
+    "title": "Kickoff call summary (sample)",
+    "type": "summary"
+  }
+}

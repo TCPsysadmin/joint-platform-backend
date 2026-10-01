@@ -1,0 +1,118 @@
+# One blueprint for every backend service in this repo.
+# Each service builds from its own rootDir, so a push only redeploys the
+# services whose folder changed. Names match the existing Render services.
+services:
+  # VP agent: FastAPI + LangGraph orchestrator (was TCPsysadmin/-vp-collaborative)
+  - type: web
+    name: video-agent
+    runtime: docker
+    rootDir: services/vp-agent
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /readyz
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: XAI_API_BASE
+        value: "https://api.x.ai/v1"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
+        sync: false
+      - key: TRANSCRIPTION_API_URL
+        sync: false
+      - key: TRANSCRIPTION_API_KEY
+        sync: false
+      - key: B2_WORKSPACE_BUCKET_PREFIX
+        value: "vpstorage"
+      - key: STORAGE_PROVISIONING_WEBHOOK_URL
+        sync: false
+      - key: STORAGE_PROVISIONING_WEBHOOK_SECRET
+        sync: false
+      - key: GOOGLE_DRIVE_PROVISIONING_PARENT_ID
+        value: "1RJQXpLXOE3cXclgpZfvSPt0U648pYuIb"
+      - key: MEDIA_DELETION_WEBHOOK_URL
+        sync: false
+      - key: MEDIA_DELETION_WEBHOOK_SECRET
+        sync: false
+      - key: LANGCHAIN_TRACING_V2
+        value: "false"
+      - key: LANGCHAIN_API_KEY
+        sync: false
+      - key: MAX_CRITIQUE_ITERATIONS
+        value: "3"
+      - key: EMBEDDING_MODEL
+        value: "text-embedding-3-small"
+      - key: LLM_MODEL
+        value: "grok-4"
+      - key: USE_MCP_TOOLS
+        value: "false"
+      - key: LOG_LEVEL
+        value: "INFO"
+
+  # Co-P chat: RAG over tcp_db_v2 (was TCPsysadmin/TCPBackend)
+  - type: web
+    name: tcp-rag-backend
+    runtime: python
+    plan: starter
+    rootDir: services/cop-chat
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: OPENAI_MODEL_NAME
+        value: gpt-4o-mini
+      - key: OPENAI_TEMPERATURE
+        value: 0.5
+      - key: SUPABASE_MATCH_FN
+        value: tcpdb_v2_search_ids
+      - key: SUPABASE_EF_SEARCH
+        value: 30
+      - key: RATE_LIMIT_RPM
+        value: 60
+      - key: RATE_LIMIT_BURST
+        value: 10
+      - key: MAX_CONNECTIONS
+        value: 1000
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://co-p.ai,https://www.co-p.ai,https://v1-collaborative-pilot-ui.vercel.app,http://localhost:3000,http://localhost:5173"
+      - key: HOST
+        value: 0.0.0.0
+
+  # Transcription: ffmpeg + whisper-1 (was TCPsysadmin/BackBlazeTranscription)
+  - type: web
+    name: media-transcription-service
+    runtime: docker
+    plan: starter
+    region: oregon
+    rootDir: services/transcription
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    disk:
+      name: transcription-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TEMP_STORAGE_DIR
+        value: /data

@@ -1,10 +1,16 @@
-name: CI
+name: vp-agent
 
 on:
   push:
     branches: ["**"]
+    paths: ["services/vp-agent/**", ".github/workflows/vp-agent.yml"]
   pull_request:
     branches: ["**"]
+    paths: ["services/vp-agent/**", ".github/workflows/vp-agent.yml"]
+
+defaults:
+  run:
+    working-directory: services/vp-agent
 
 jobs:
   lint-and-test:
@@ -16,6 +22,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: services/vp-agent/requirements-dev.txt
 
       - name: Install dev dependencies
         run: pip install -r requirements-dev.txt

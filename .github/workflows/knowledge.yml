@@ -1,0 +1,26 @@
+name: knowledge
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["knowledge/**", "tools/kb/**", ".github/workflows/knowledge.yml"]
+  pull_request:
+    branches: ["**"]
+    paths: ["knowledge/**", "tools/kb/**", ".github/workflows/knowledge.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests
+        run: pip install pytest && pytest tools/kb/tests -v
+
+      # Fails if a wiki page cites a missing source, ids collide, or index.json is stale.
+      - name: Check knowledge base
+        run: python tools/kb/kb.py check

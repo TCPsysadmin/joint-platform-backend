@@ -1,0 +1,38 @@
+name: transcription
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["services/transcription/**", ".github/workflows/transcription.yml"]
+  pull_request:
+    branches: ["**"]
+    paths: ["services/transcription/**", ".github/workflows/transcription.yml"]
+
+defaults:
+  run:
+    working-directory: services/transcription
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: services/transcription/requirements.txt
+
+      # The tail-truncation tests drive real ffmpeg; without it they skip.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Pytest
+        run: pytest tests/ -v
+        env:
+          API_KEY: "test-key"
+          OPENAI_API_KEY: "test-key"
