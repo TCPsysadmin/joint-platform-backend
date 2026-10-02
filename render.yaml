@@ -1,11 +1,19 @@
 # One blueprint for every backend service in this repo.
 # Each service builds from its own rootDir, so a push only redeploys the
-# services whose folder changed. Names match the existing Render services.
+# services whose folder changed. Names, region, runtime and disk match the
+# live Render services as of 2026-10-01 (workspace "My Workspace", Ohio).
+# The live services are NOT managed by a Blueprint yet. Before syncing this
+# file as one: Render's API did not show their env vars, and any `value:`
+# below overwrites the live value on sync, so compare them in the dashboard.
+# The free-plan "-vp-collaborative-1" (branch task/multi-workspace-management)
+# is a separate service and is intentionally not in this file.
 services:
   # VP agent: FastAPI + LangGraph orchestrator (was TCPsysadmin/-vp-collaborative)
   - type: web
-    name: video-agent
+    name: -vp-collaborative
     runtime: docker
+    plan: starter
+    region: ohio
     rootDir: services/vp-agent
     dockerfilePath: ./Dockerfile
     dockerContext: .
@@ -60,16 +68,15 @@ services:
 
   # Co-P chat: RAG over tcp_db_v2 (was TCPsysadmin/TCPBackend)
   - type: web
-    name: tcp-rag-backend
-    runtime: python
+    name: TCPBackend
+    runtime: docker
     plan: starter
+    region: ohio
     rootDir: services/cop-chat
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
       - key: OPENAI_API_KEY
         sync: false
       - key: SUPABASE_URL
@@ -97,18 +104,18 @@ services:
 
   # Transcription: ffmpeg + whisper-1 (was TCPsysadmin/BackBlazeTranscription)
   - type: web
-    name: media-transcription-service
+    name: BackBlazeTranscription
     runtime: docker
     plan: starter
-    region: oregon
+    region: ohio
     rootDir: services/transcription
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
     disk:
-      name: transcription-data
+      name: disk
       mountPath: /data
-      sizeGB: 10
+      sizeGB: 12
     envVars:
       - key: API_KEY
         sync: false

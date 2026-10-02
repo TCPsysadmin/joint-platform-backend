@@ -7,7 +7,7 @@ TCP runs two AI agents, VP (video clip agent) and Co-P (The Collaborative Pilot)
 |  | VP | Co-P |
 | --- | --- | --- |
 | Backend repo | `-vp-collaborative` (FastAPI + LangGraph) | `TCPBackend` (FastAPI) |
-| Backend host | Render service `video-agent` (Docker) | Render service `tcp-rag-backend` (Python) |
+| Backend host | Render service `-vp-collaborative` (Docker) | Render service `TCPBackend` (Docker) |
 | Chat model | Grok 4 via xAI | Grok 4.1 fast reasoning via xAI |
 | Embeddings | OpenAI `text-embedding-3-small` | OpenAI `text-embedding-3-small` |
 | Database | Supabase project "VP db" | Supabase project "Co-p DB" (Nano tier) |
@@ -24,10 +24,13 @@ The frontend is the only shared piece: VP calls go down the left lane and Co-P c
 
 | Repo | Stack | What it is | Hosted |
 | --- | --- | --- | --- |
-| `joint-platform-frontend` | Next.js 15, React 19, Tailwind | Combined UI. Sidebar: agent switcher (VP / Co-P), workspace picker, New chat, Chat / Knowledge / Ingest tabs, conversation list, account. VP lives under `/vp/...`, Co-P under `/cop/...` | Vercel (env vars and CORS not set up yet) |
-| `vp_frontend` | Next.js | Old VP UI: chat, knowledge base (media library), workspaces, ingest | Open question |
-| `v1-collaborative-pilot-ui` | Not checked (repo not cloned here) | Old Co-P UI. Not cloned on this machine | Vercel, served at co-p.ai (per TCPBackend's CORS list) |
-| `ingestionhub-frontend` | Vite + React | Older standalone VP ingest tool: drop files or links, transcribe, send to Drive via n8n. Its flow now lives in the Ingest tab | Open question |
+| `joint-platform-frontend` | Next.js 15, React 19, Tailwind | Combined UI. Sidebar: agent switcher (VP / Co-P), workspace picker, New chat, Chat / Knowledge / Ingest tabs, conversation list, account. VP lives under `/vp/...`, Co-P under `/cop/...` | Vercel project joint-platform-frontend at joint-platform-frontend.vercel.app. Env vars are set; last deployed 2026-09-26 from a CLI upload, not a git push. CORS is not set up yet |
+| `vp_frontend` | Next.js | Old VP UI: chat, knowledge base (media library), workspaces, ingest | Vercel project vp-frontend at vp-frontend-smoky.vercel.app; last deployed 2026-09-19 |
+| `v1-collaborative-pilot-ui` | Next.js 15, React 19, generated with v0.app | Old Co-P UI: Google sign-in (or the legacy ?contactId= link), chat with a sessions sidebar. Calls tcpbackend.onrender.com | Vercel project v1-collaborative-pilot-ui at www.co-p.ai (co-p.ai redirects there); last deployed 2026-01-29 |
+| `ingestionhub-frontend` | Vite + React | Older standalone VP ingest tool: drop files or links, transcribe, send to Drive via n8n. Its flow now lives in the Ingest tab | Vercel project ingestionhub-frontend at ingestionhub-frontend.vercel.app; still deployed, last on 2026-08-03 |
+| `TCPFrontEnd` | Next.js | Earliest Co-P UI, replaced by v1-collaborative-pilot-ui. No env vars set | Vercel project collaborativepilotorigin at collaborativepilot.vercel.app; last deployed 2025-10-09 |
+
+All five Vercel projects sit in the `thecollaborativeprocess` scope of the `tcpsysadmin` Vercel account (Hobby plan). Every `*.vercel.app` address is behind Vercel's login wall, so only www.co-p.ai is open to the public. The joint frontend needs a custom domain, or that protection turned off, before outside users can reach it.
 
 How the joint frontend is organised:
 
@@ -42,7 +45,7 @@ How the joint frontend is organised:
 
 Three Python services, all FastAPI on Render. VP's agent is a multi-step LangGraph pipeline; Co-P's is a single retrieve-then-answer RAG call.
 
-### VP: `-vp-collaborative` (Render: `video-agent`)
+### VP: `-vp-collaborative` (Render: `-vp-collaborative`)
 
 - **What it does:** multi-tenant clip recommender. A user chats; it searches that workspace's transcripts and brand doctrine, drafts a clip, critiques it against the brand rubric, refines until it passes, then waits for the user to approve before posting through OpusClip.
 - **Graph** (`orchestrator/graph.py`): `route_intent` sends a turn to chitchat (`chat_response`), `expand_clip`, reuse of an earlier clip (`fetch_source`) or a new search (`fetch_doctrine` → `retrieve`). Search then runs `fetch_source` → `analyze` → `critique`, looping through `refine` → `retrieve` until approved, then `recommend` → `post_stub`. The graph pauses before `post_stub` for `/confirm`.
@@ -51,7 +54,7 @@ Three Python services, all FastAPI on Render. VP's agent is a multi-step LangGra
 - **Endpoints:** `/chat` (SSE) and `/confirm`; `/sessions` and session documents; `/media` (list, detail, signed video URL, bulk move and delete, storage); `/ingestion/b2/media` and `/ingestion/b2/text`; `/workspaces` (create, members, invites, join); `/admin/clients` and `/admin/users`; `/health` and `/readyz`.
 - **CORS:** env var `CORS_ORIGINS`.
 
-### Co-P: `TCPBackend` (Render: `tcp-rag-backend`)
+### Co-P: `TCPBackend` (Render: `TCPBackend`)
 
 - **What it does:** one chat agent. Each turn embeds the question, pulls the top 3 chunks from `tcp_db_v2`, and streams an answer from Grok with the recent chat history.
 - **Models:** `grok-4-1-fast-reasoning` via xAI (`main.py` passes `grok-4-fast-reasoning`, but `rag_service.py` overrides it); `gpt-4o-mini` for session summaries; OpenAI `text-embedding-3-small`.
@@ -61,13 +64,13 @@ Three Python services, all FastAPI on Render. VP's agent is a multi-step LangGra
 - **CORS:** env var `CORS_ALLOWED_ORIGINS` (currently co-p.ai, www.co-p.ai, the old Vercel URL and localhost).
 - Its git branches are `main`, `task/multi-workspace-management` (same commit as `main`) and `new-db` (Oct 2025). Justin's merged-backend branch was never pushed.
 
-### VP transcription: `BackBlazeTranscription` (Render: `media-transcription-service`)
+### VP transcription: `BackBlazeTranscription` (Render: `BackBlazeTranscription`)
 
 - **What it does:** turns audio or video into a timestamped transcript. It takes a B2 file path, a URL or an uploaded file, extracts audio with ffmpeg, splits it into 10-minute chunks, and sends each to OpenAI `whisper-1`.
 - **Endpoints:** `/transcribe`, `/transcribeHTTP`, `/fetchText`, `/transcribe-file`, resumable `/uploads/...` (init, chunk, complete, abort), `/queue`, `/jobs/{id}`, `/health`.
 - **Auth:** one shared `X-API-KEY` header.
-- **Host:** Render Docker service in Oregon with a 10 GB disk at `/data` for temp files.
-- Justin's fix for transcripts missing their final chunk was merged to `main` on 2026-09-30.
+- **Host:** Render Docker service in Ohio with a 12 GB disk at `/data` for temp files.
+- Justin's fix for transcripts missing their final chunk was merged to `main` on 2026-09-30, but it is not live: the Render service builds from task/multi-workspace-management with auto-deploy off, and last deployed on 2026-08-27.
 
 ## Databases and storage
 
@@ -98,6 +101,10 @@ Schema and migrations are checked into the repo (`databaseschema.sql` plus the `
 | `tcp_db_v2` | Knowledge chunks with embeddings, searched by the `tcpdb_v2_search_ids` RPC |
 | `encrypted_sessions` | Chat sessions per GoHighLevel contact; title in plaintext, summary encrypted |
 | `encrypted_messages` | Chat messages, AES-256-GCM encrypted by the backend |
+| `entitlements`, `login_events`, `payment_events` | Who has paid access, and logs of logins and payments. Seen only in Supabase's advisor output; columns and row counts not yet visible |
+| `chat_memory_v2` | Older chat history table from langchain\_setup.sql; probably unused |
+
+Co-p DB runs Postgres 17 in us-east-1 and was created on 2025-08-05. Our Supabase connection can read project settings and Supabase's advisor reports, but not table contents, migrations or edge functions, so this list is incomplete.
 
 The checked-in `services/langchain_setup.sql` is out of date: it defines `chat_memory_v2` and `langchain_chat_history`, not the `encrypted_*` tables or `tcpdb_v2_search_ids` the code calls. The real schema lives only in the Supabase project. This project also hosts the login edge functions (see User auth).
 
@@ -181,21 +188,24 @@ The frontend is on Vercel and the three backends are on Render; the data lives i
 
 | What | Host | Service / project | Key config (names only) |
 | --- | --- | --- | --- |
-| `joint-platform-frontend` | Vercel | not set up yet | `NEXT_PUBLIC_VP_*`, `NEXT_PUBLIC_COP_API_BASE_URL`, `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, `COP_SUPABASE_FUNCTIONS_URL`, `COP_EDGE_APP_SECRET` |
-| `v1-collaborative-pilot-ui` (old Co-P) | Vercel | co-p.ai | not checked |
-| `-vp-collaborative` | Render (Docker) | `video-agent`, health `/readyz` | `SUPABASE_*`, `XAI_API_KEY`, `OPENAI_API_KEY`, `B2_*`, `TRANSCRIPTION_API_URL/KEY`, provisioning and media-deletion webhooks, `CORS_ORIGINS` |
-| `TCPBackend` | Render (Python 3.11, starter) | `tcp-rag-backend`, health `/health` | `SUPABASE_URL/KEY`, `OPENAI_API_KEY`, `GROK_API_KEY`, `JWT_SECRET`, `JWT_ISSUER`, `ENCRYPTION_KEY`, `CORS_ALLOWED_ORIGINS` |
-| `BackBlazeTranscription` | Render (Docker, starter, Oregon, 10 GB disk) | `media-transcription-service`, health `/health` | `API_KEY`, `OPENAI_API_KEY`, `B2_*`, `N8N_DRIVE_WEBHOOK_URL` |
+| `joint-platform-frontend` | Vercel | joint-platform-frontend.vercel.app (behind Vercel login) | `NEXT_PUBLIC_VP_*`, `NEXT_PUBLIC_COP_API_BASE_URL`, `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, `COP_SUPABASE_FUNCTIONS_URL`, `COP_EDGE_APP_SECRET` |
+| `v1-collaborative-pilot-ui` (old Co-P) | Vercel | www.co-p.ai | NEXT\_PUBLIC\_GOOGLE\_CLIENT\_ID, NEXT\_PUBLIC\_BACKEND\_URL |
+| `-vp-collaborative` | Render (Docker, starter, Ohio) | `-vp-collaborative`, health `/readyz` | `SUPABASE_*`, `XAI_API_KEY`, `OPENAI_API_KEY`, `B2_*`, `TRANSCRIPTION_API_URL/KEY`, provisioning and media-deletion webhooks, `CORS_ORIGINS` |
+| `TCPBackend` | Render (Docker, starter, Ohio) | `TCPBackend`, health `/health` | `SUPABASE_URL/KEY`, `OPENAI_API_KEY`, `GROK_API_KEY`, `JWT_SECRET`, `JWT_ISSUER`, `ENCRYPTION_KEY`, `CORS_ALLOWED_ORIGINS` |
+| `BackBlazeTranscription` | Render (Docker, starter, Ohio, 12 GB disk) | `BackBlazeTranscription`, health `/health` | `API_KEY`, `OPENAI_API_KEY`, `B2_*`, `N8N_DRIVE_WEBHOOK_URL` |
+| `-vp-collaborative` (second copy) | Render (Docker, free, Ohio) | `-vp-collaborative-1`, branch task/multi-workspace-management, last deployed 2026-08-27 | Same repo as -vp-collaborative; nothing in the code points at it |
 | VP data and auth | Supabase | "VP db" | Auth redirect URLs must include the frontend's URL |
 | Co-P data and login functions | Supabase | "Co-p DB" (Nano) | Edge functions `google-email-lookup`, `ghl-login-handler` |
 | Workflows | n8n | n8n Cloud: thecollaborativeprocess.app.n8n.cloud | Webhooks listed under Ingestion |
 | Video files | Backblaze B2 | one private bucket per VP workspace |  |
 | Third-party APIs | xAI, OpenAI, GoHighLevel, Google OAuth, OpusClip |  |  |
 
+What Render shows (checked 2026-10-01): one workspace, "My Workspace", with four Docker web services in Ohio and no databases, cron jobs or static sites. `-vp-collaborative` and `TCPBackend` deploy `main` on every commit; `TCPBackend` last deployed on 2026-01-29. No service has a health check path set in Render, so the health endpoints above exist in the code but Render does not use them. The API does not return env var names or custom domains, so the config column comes from the code.
+
 To put the joint frontend live, its Vercel URL has to be added in four places:
 
-- [ ] `CORS_ALLOWED_ORIGINS` on `tcp-rag-backend`
-- [ ] `CORS_ORIGINS` on `video-agent`
+- [ ] `CORS_ALLOWED_ORIGINS` on `TCPBackend`
+- [ ] `CORS_ORIGINS` on `-vp-collaborative`
 - [ ] VP db auth redirect URLs
 - [ ] Google OAuth authorized JavaScript origins
 
@@ -217,3 +227,8 @@ Security findings are kept in the private live doc (link at the top), not in thi
 - [ ] Finish the Vercel setup (checklist under Deployment).
 - [ ] Add a read endpoint on TCPBackend so Co-P can have a Knowledge view.
 - [ ] Pick the final app name ("TCP Agents" is a placeholder in `lib/agents.ts`).
+
+* [ ] Deploy Justin's transcript fix: point the BackBlazeTranscription service at `main` (or merge into its branch) and turn auto-deploy on.
+* [ ] Delete or document the unused-looking copies: Render `-vp-collaborative-1` (free plan) and Vercel `collaborativepilotorigin`.
+* [ ] Set health check paths on the Render services (`/readyz` for VP, `/health` for the other two).
+* [ ] Give the Supabase connection read access to tables and edge functions, and find the VP db project, so the database sections can be checked.

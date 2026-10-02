@@ -8,11 +8,14 @@ backends, databases, auth, ingestion, and where everything is hosted.
 
 | Folder | Render service | Was | Stack |
 |---|---|---|---|
-| `services/vp-agent` | `video-agent` (Docker) | `TCPsysadmin/-vp-collaborative` | FastAPI + LangGraph, grok-4, Supabase Postgres checkpoints |
-| `services/cop-chat` | `tcp-rag-backend` (Python) | `TCPsysadmin/TCPBackend` | FastAPI RAG over `tcp_db_v2`, grok-4-1-fast-reasoning |
-| `services/transcription` | `media-transcription-service` (Docker, 10 GB disk) | `TCPsysadmin/BackBlazeTranscription` | FastAPI + ffmpeg + whisper-1 |
+| `services/vp-agent` | `-vp-collaborative` (Docker) | `TCPsysadmin/-vp-collaborative` | FastAPI + LangGraph, grok-4, Supabase Postgres checkpoints |
+| `services/cop-chat` | `TCPBackend` (Docker) | `TCPsysadmin/TCPBackend` | FastAPI RAG over `tcp_db_v2`, grok-4-1-fast-reasoning |
+| `services/transcription` | `BackBlazeTranscription` (Docker, 12 GB disk) | `TCPsysadmin/BackBlazeTranscription` | FastAPI + ffmpeg + whisper-1 |
 | `knowledge/` | n/a | new | Workspace data in git: user library + LLM wiki ([README](knowledge/README.md)) |
 | `tools/kb/` | n/a | new | Index and check the knowledge base |
+
+Render names are the live service names (workspace "My Workspace", Ohio).
+The old per-service `render.yaml` files used different names that Render never had.
 
 Each service was imported with `git subtree`, so its full history is preserved
 (`git log -- services/vp-agent`). Each still has its own README, `.env.example`,
