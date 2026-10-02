@@ -3,6 +3,9 @@
 All backend services for the TCP joint platform (VP agent + Co-P) in one repo.
 The frontend lives in `joint-platform-frontend`.
 
+New here? Start with the [stack overview](docs/stack-overview.md): frontends,
+backends, databases, auth, ingestion, and where everything is hosted.
+
 | Folder | Render service | Was | Stack |
 |---|---|---|---|
 | `services/vp-agent` | `video-agent` (Docker) | `TCPsysadmin/-vp-collaborative` | FastAPI + LangGraph, grok-4, Supabase Postgres checkpoints |
