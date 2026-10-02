@@ -3,8 +3,10 @@
 All backend services for the TCP joint platform (VP agent + Co-P) in one repo.
 The frontend lives in `joint-platform-frontend`.
 
-New here? Start with the [stack overview](docs/stack-overview.md): frontends,
-backends, databases, auth, ingestion, and where everything is hosted.
+New here? Start with the [stack overview](docs/stack-overview.md): how the
+frontends, backends, databases, auth, ingestion and hosting fit together. It
+covers architecture only; known issues and to-dos live in the team's private
+doc.
 
 | Folder | Render service | Was | Stack |
 |---|---|---|---|

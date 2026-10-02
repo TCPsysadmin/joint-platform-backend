@@ -1,6 +1,6 @@
 # TCP Stack Overview
 
-Snapshot of the live doc as of 2026-10-01: https://claude.ai/code/artifact/1a09cd2f-ed66-44a9-a703-bf8a8c876063 (diagram is there).
+Architecture snapshot of the live doc as of 2026-10-01: https://claude.ai/code/artifact/1a09cd2f-ed66-44a9-a703-bf8a8c876063 (the diagram is there).
 
 TCP runs two AI agents, VP (video clip agent) and Co-P (The Collaborative Pilot). Each has its own backend, its own Supabase project and its own sign-in. Only the frontend is shared: `joint-platform-frontend` puts both behind one sidebar switcher, and each half calls its own backend directly. The three backends now share one repo, joint-platform-backend, but still deploy and run separately; merging their logic has not started.
 
@@ -45,7 +45,7 @@ How the joint frontend is organised:
 
 Three Python services, all FastAPI on Render. VP's agent is a multi-step LangGraph pipeline; Co-P's is a single retrieve-then-answer RAG call.
 
-### VP: `-vp-collaborative` (Render: `-vp-collaborative`)
+### VP: `-vp-collaborative` (repo and Render service)
 
 - **What it does:** multi-tenant clip recommender. A user chats; it searches that workspace's transcripts and brand doctrine, drafts a clip, critiques it against the brand rubric, refines until it passes, then waits for the user to approve before posting through OpusClip.
 - **Graph** (`orchestrator/graph.py`): `route_intent` sends a turn to chitchat (`chat_response`), `expand_clip`, reuse of an earlier clip (`fetch_source`) or a new search (`fetch_doctrine` → `retrieve`). Search then runs `fetch_source` → `analyze` → `critique`, looping through `refine` → `retrieve` until approved, then `recommend` → `post_stub`. The graph pauses before `post_stub` for `/confirm`.
@@ -54,7 +54,7 @@ Three Python services, all FastAPI on Render. VP's agent is a multi-step LangGra
 - **Endpoints:** `/chat` (SSE) and `/confirm`; `/sessions` and session documents; `/media` (list, detail, signed video URL, bulk move and delete, storage); `/ingestion/b2/media` and `/ingestion/b2/text`; `/workspaces` (create, members, invites, join); `/admin/clients` and `/admin/users`; `/health` and `/readyz`.
 - **CORS:** env var `CORS_ORIGINS`.
 
-### Co-P: `TCPBackend` (Render: `TCPBackend`)
+### Co-P: `TCPBackend` (repo and Render service)
 
 - **What it does:** one chat agent. Each turn embeds the question, pulls the top 3 chunks from `tcp_db_v2`, and streams an answer from Grok with the recent chat history.
 - **Models:** `grok-4-1-fast-reasoning` via xAI (`main.py` passes `grok-4-fast-reasoning`, but `rag_service.py` overrides it); `gpt-4o-mini` for session summaries; OpenAI `text-embedding-3-small`.
@@ -64,7 +64,7 @@ Three Python services, all FastAPI on Render. VP's agent is a multi-step LangGra
 - **CORS:** env var `CORS_ALLOWED_ORIGINS` (currently co-p.ai, www.co-p.ai, the old Vercel URL and localhost).
 - Its git branches are `main`, `task/multi-workspace-management` (same commit as `main`) and `new-db` (Oct 2025). Justin's merged-backend branch was never pushed.
 
-### VP transcription: `BackBlazeTranscription` (Render: `BackBlazeTranscription`)
+### VP transcription: `BackBlazeTranscription` (repo and Render service)
 
 - **What it does:** turns audio or video into a timestamped transcript. It takes a B2 file path, a URL or an uploaded file, extracts audio with ffmpeg, splits it into 10-minute chunks, and sends each to OpenAI `whisper-1`.
 - **Endpoints:** `/transcribe`, `/transcribeHTTP`, `/fetchText`, `/transcribe-file`, resumable `/uploads/...` (init, chunk, complete, abort), `/queue`, `/jobs/{id}`, `/health`.
@@ -202,33 +202,4 @@ The frontend is on Vercel and the three backends are on Render; the data lives i
 
 What Render shows (checked 2026-10-01): one workspace, "My Workspace", with four Docker web services in Ohio and no databases, cron jobs or static sites. `-vp-collaborative` and `TCPBackend` deploy `main` on every commit; `TCPBackend` last deployed on 2026-01-29. No service has a health check path set in Render, so the health endpoints above exist in the code but Render does not use them. The API does not return env var names or custom domains, so the config column comes from the code.
 
-To put the joint frontend live, its Vercel URL has to be added in four places:
-
-- [ ] `CORS_ALLOWED_ORIGINS` on `TCPBackend`
-- [ ] `CORS_ORIGINS` on `-vp-collaborative`
-- [ ] VP db auth redirect URLs
-- [ ] Google OAuth authorized JavaScript origins
-
-## Known issues and open to-dos
-
-Security findings are kept in the private live doc (link at the top), not in this public repo.
-
-### Co-P quality (from the TCPBackend audit)
-
-- Retrieval takes the top 3 chunks from `tcp_db_v2` with an empty metadata filter: no filtering by project or file, and no citations.
-- The checked-in SQL does not match the tables and RPCs the code calls.
-- The system prompt says "It's okay to hallucinate".
-- There is no ingestion pipeline in the repo.
-
-### Platform
-
-- [ ] Switch each Render service to `joint-platform-backend` (steps in its README). Justin's merged-backend branch was never pushed, so the new repo was built from the three existing ones.
-- [ ] Run `npm install` and `npm run build` on `joint-platform-frontend`, and commit `package-lock.json`.
-- [ ] Finish the Vercel setup (checklist under Deployment).
-- [ ] Add a read endpoint on TCPBackend so Co-P can have a Knowledge view.
-- [ ] Pick the final app name ("TCP Agents" is a placeholder in `lib/agents.ts`).
-
-* [ ] Deploy Justin's transcript fix: point the BackBlazeTranscription service at `main` (or merge into its branch) and turn auto-deploy on.
-* [ ] Delete or document the unused-looking copies: Render `-vp-collaborative-1` (free plan) and Vercel `collaborativepilotorigin`.
-* [ ] Set health check paths on the Render services (`/readyz` for VP, `/health` for the other two).
-* [ ] Give the Supabase connection read access to tables and edge functions, and find the VP db project, so the database sections can be checked.
+Known issues and to-dos are tracked in the live doc's "Issues and to-dos" tab, not in this repo.
